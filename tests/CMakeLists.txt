@@ -1885,6 +1885,10 @@ if(Python3_Interpreter_FOUND AND SUNSHINE_TEST_GXX)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_encoder_probe_lookup_behavior.py"
             --compiler "${SUNSHINE_TEST_GXX}")
     set_tests_properties(regression_encoder_probe_lookup_behavior PROPERTIES LABELS "component" TIMEOUT 120)
+    add_test(NAME regression_continuous_audio_request
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/input/test_continuous_audio_request.py"
+            --compiler "${SUNSHINE_TEST_GXX}")
+    set_tests_properties(regression_continuous_audio_request PROPERTIES LABELS "component" TIMEOUT 30)
     add_test(NAME regression_remote_input_reconnect
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_remote_input_reconnect.py"
             --compiler "${SUNSHINE_TEST_GXX}"
