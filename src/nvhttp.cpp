@@ -226,7 +226,7 @@ namespace nvhttp {
     }
   }  // namespace
 
-  static constexpr std::string_view EMPTY_PROPERTY_TREE_ERROR_MSG = "Property tree is empty. Probably, control flow got interrupted by an unexpected C++ exception. This is a bug in Sunshine. Moonlight-qt will report Malformed XML (missing root element)."sv;
+  static constexpr std::string_view EMPTY_PROPERTY_TREE_ERROR_MSG = "Property tree is empty. Probably, control flow got interrupted by an unexpected C++ exception. This is a bug in Vibepollo. Moonlight-qt will report Malformed XML (missing root element)."sv;
 
   void notify_remote_input_transport_lost(const std::string_view client_uuid, const std::uint64_t generation) {
     host_stream_control::activity_guard_t activity;
@@ -4718,6 +4718,10 @@ namespace nvhttp {
       bool revert_display_configuration = false;
       auto g = util::fail_guard([&]() {
         std::ostringstream data;
+
+        if (tree.empty()) {
+          BOOST_LOG(error) << EMPTY_PROPERTY_TREE_ERROR_MSG;
+        }
 
         pt::write_xml(data, tree);
         response->write(data.str());
