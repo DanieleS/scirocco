@@ -1753,12 +1753,6 @@ namespace config {
   void apply_config(std::unordered_map<std::string, std::string> &&vars) {
     reset_runtime_config_to_defaults();
     std::chrono::milliseconds control_peer_timeout {0};
-#ifndef __ANDROID__
-    // TODO: Android can possibly support this
-    if (!fs::exists(stream.file_apps.c_str())) {
-      fs::copy_file(SUNSHINE_ASSETS_DIR "/apps.json", stream.file_apps);
-    }
-#endif
 
     nv::normalize_split_encode_alias(vars);
     log_config_settings(vars, true);
