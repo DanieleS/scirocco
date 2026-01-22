@@ -3083,7 +3083,7 @@ namespace nvhttp {
         RAND_bytes((unsigned char *) &launch_session->control_connect_data, sizeof(launch_session->control_connect_data));
 
         launch_session->iv.resize(16);
-        uint32_t prepend_iv = util::endian::big<uint32_t>(util::from_view(get_arg(args, "rikeyid")));
+        uint32_t prepend_iv = util::endian::big<uint32_t>(static_cast<uint32_t>(util::from_view(get_arg(args, "rikeyid"))));
         auto prepend_iv_p = (uint8_t *) &prepend_iv;
         std::copy(prepend_iv_p, prepend_iv_p + sizeof(prepend_iv), std::begin(launch_session->iv));
       }
@@ -3314,10 +3314,10 @@ namespace nvhttp {
       launch_session->framegen_refresh_multiplier = 1;
       launch_session->framegen_fixed_refresh = false;
       launch_session->enable_sops = util::from_view(get_arg(args, "sops", "0"));
-      launch_session->surround_info = util::from_view(get_arg(args, "surroundAudioInfo", "196610"));
+      launch_session->surround_info = static_cast<int>(util::from_view(get_arg(args, "surroundAudioInfo", "196610")));
       launch_session->surround_params = (get_arg(args, "surroundParams", ""));
       launch_session->continuous_audio = util::from_view(get_arg(args, "continuousAudio", "0"));
-      launch_session->gcmap = util::from_view(get_arg(args, "gcmap", "0"));
+      launch_session->gcmap = static_cast<int>(util::from_view(get_arg(args, "gcmap", "0")));
       launch_session->gcpersist = util::from_view(get_arg(args, "gcpersist", "0")) != 0;
       const auto playstation_gamepad_mask =
         (int) util::from_view(get_arg(args, "psmap", "0"));
@@ -3426,7 +3426,7 @@ namespace nvhttp {
       launch_session->input_only = input_only;
 
       launch_session->iv.resize(16);
-      uint32_t prepend_iv = util::endian::big<uint32_t>(util::from_view(get_arg(args, "rikeyid")));
+      uint32_t prepend_iv = util::endian::big<uint32_t>(static_cast<uint32_t>(util::from_view(get_arg(args, "rikeyid"))));
       auto prepend_iv_p = (uint8_t *) &prepend_iv;
       std::copy(prepend_iv_p, prepend_iv_p + sizeof(prepend_iv), std::begin(launch_session->iv));
 
