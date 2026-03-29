@@ -764,4 +764,45 @@ namespace {
     records[0]->perm = crypto::PERM::_no;
     EXPECT_FALSE(native_resolve(request));
   }
+
+  TEST_F(NativeTlsClientIdentity, AccessTogglePreservesNarrowPermissionsAndInvalidatesLiveAuthorization) {
+    auto transport = factory.connect();
+    const auto request = factory.request(transport);
+    records[0]->perm = crypto::PERM::input_kbd;
+    ASSERT_TRUE(native_authenticate(request).identity);
+    records[0]->enabled = false;
+    EXPECT_FALSE(native_resolve(request));
+    EXPECT_FALSE(tls_identity::current_native_permissions_match(records, first_uuid, crypto::PERM::input_kbd));
+    EXPECT_EQ(records[0]->perm, crypto::PERM::input_kbd);
+    native_store.revoke(first_uuid);
+    records[0]->enabled = true;
+    EXPECT_FALSE(native_resolve(request)); // old transport stays revoked
+    auto replacement = factory.connect();
+    const auto replacement_request = factory.request(replacement);
+    EXPECT_TRUE(native_authenticate(replacement_request).identity);
+    EXPECT_EQ(native_resolve(replacement_request)->perm, crypto::PERM::input_kbd);
+    records[0]->perm = crypto::PERM::_no;
+    EXPECT_FALSE(native_resolve(replacement_request)); // enable never grants a mask
+  }
+
+  TEST_F(NativeTlsClientIdentity, AccessToggleDoesNotChangeOtherClientAuthorization) {
+    auto second = std::make_shared<crypto::named_cert_t>();
+    second->uuid = second_uuid;
+    second->name = "Second native client";
+    second->cert = second_credentials().x509;
+    second->perm = crypto::PERM::view;
+    records.push_back(second);
+    chain.add(records.back());
+    auto first_transport = factory.connect();
+    auto second_transport = factory.connect();
+    const auto first_request = factory.request(first_transport);
+    const auto second_request = factory.request(second_transport);
+    ASSERT_TRUE(native_authenticate(first_request).identity);
+    ASSERT_TRUE(native_authenticate(second_request, second_credentials()).identity);
+    records[0]->enabled = false;
+    native_store.revoke(first_uuid);
+    EXPECT_FALSE(native_resolve(first_request));
+    ASSERT_TRUE(native_resolve(second_request));
+    EXPECT_EQ(native_resolve(second_request)->uuid, second_uuid);
+  }
 }  // namespace

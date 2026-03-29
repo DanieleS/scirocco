@@ -2155,3 +2155,11 @@ if(SUNSHINE_TEST_PYTHON_EXECUTABLE AND NOT WIN32)
     set_tests_properties(test_component_windows_audio_continuous_adapter
         PROPERTIES LABELS "component" TIMEOUT 60)
 endif()
+if(SUNSHINE_TEST_PYTHON_EXECUTABLE AND NOT WIN32)
+    add_test(NAME test_component_client_enabled_mutation
+        COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/input/test_client_enabled_mutation.py"
+            --compiler "${CMAKE_CXX_COMPILER}"
+            --json-include "$<TARGET_PROPERTY:nlohmann_json::nlohmann_json,INTERFACE_INCLUDE_DIRECTORIES>")
+    set_tests_properties(test_component_client_enabled_mutation PROPERTIES LABELS "component" TIMEOUT 60)
+endif()

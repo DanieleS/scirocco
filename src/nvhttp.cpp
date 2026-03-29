@@ -2401,6 +2401,7 @@ namespace nvhttp {
             named_cert_node["output_name_override"] = named_cert_p->output_name_override;
           }
           named_cert_node["perm"] = static_cast<uint32_t>(named_cert_p->perm);
+          named_cert_node["enabled"] = named_cert_p->enabled;
           named_cert_node["enable_legacy_ordering"] = named_cert_p->enable_legacy_ordering;
           named_cert_node["allow_client_commands"] = named_cert_p->allow_client_commands;
           named_cert_node["allow_sleep"] = named_cert_p->allow_sleep;
@@ -2546,11 +2547,7 @@ namespace nvhttp {
               named_cert_p->virtual_display_mode_override = el.value("virtual_display_mode", "");
               named_cert_p->virtual_display_layout_override = el.value("virtual_display_layout", "");
               named_cert_p->perm = (PERM) (util::get_non_string_json_value<uint32_t>(el, "perm", (uint32_t) PERM::_all)) & PERM::_all;
-              // Imported Vibeshine pairings use a boolean instead of Apollo's
-              // permission mask. Never reactivate a disabled imported client.
-              if (!util::get_non_string_json_value<bool>(el, "enabled", true)) {
-                named_cert_p->perm = PERM::_no;
-              }
+              named_cert_p->enabled = util::get_non_string_json_value<bool>(el, "enabled", true);
               named_cert_p->enable_legacy_ordering = util::get_non_string_json_value<bool>(el, "enable_legacy_ordering", true);
               named_cert_p->allow_client_commands = util::get_non_string_json_value<bool>(el, "allow_client_commands", true);
               named_cert_p->allow_sleep = el.contains("allow_sleep") && el["allow_sleep"].is_boolean() && el["allow_sleep"].get<bool>();
@@ -2712,10 +2709,14 @@ namespace nvhttp {
       if (existing != client_root.named_devices.end()) {
         // A verified re-pair restores a disabled client's default access while
         // retaining its stable UUID, commands and display preferences.
-        if ((*existing)->perm == PERM::_no) {
-          (*existing)->perm = PERM::_default;
+        if ((*existing)->perm == PERM::_no || !(*existing)->enabled) {
+          const auto previous_permissions = (*existing)->perm;
+          const auto previously_enabled = (*existing)->enabled;
+          if ((*existing)->perm == PERM::_no) (*existing)->perm = PERM::_default;
+          (*existing)->enabled = true;
           if (!transient && !save_state_snapshot_locked(client_root)) {
-            (*existing)->perm = PERM::_no;
+            (*existing)->perm = previous_permissions;
+            (*existing)->enabled = previously_enabled;
             return false;
           }
         }
@@ -4428,6 +4429,7 @@ namespace nvhttp {
         named_cert_node["virtual_display_mode"] = named_cert->virtual_display_mode_override;
         named_cert_node["virtual_display_layout"] = named_cert->virtual_display_layout_override;
         named_cert_node["perm"] = static_cast<uint32_t>(named_cert->perm);
+        named_cert_node["enabled"] = named_cert->enabled;
         named_cert_node["enable_legacy_ordering"] = named_cert->enable_legacy_ordering;
         named_cert_node["allow_client_commands"] = named_cert->allow_client_commands;
         named_cert_node["allow_sleep"] = named_cert->allow_sleep;
@@ -7771,6 +7773,51 @@ launch_session->exact_target_hold.reset();
       save_state();
     }
     return updated;
+  }
+
+  bool set_client_enabled(std::string_view uuid, bool enabled) {
+    host_stream_control::activity_guard_t activity;
+    if (!activity) return false;
+    bool updated = false;
+    bool previously_enabled = false;
+    bool persisted = false;
+    const bool fresh_state = config::sunshine.flags[config::flag::FRESH_STATE];
+    if (!fresh_state && !authorization_state_ready.load(std::memory_order_acquire)) {
+      BOOST_LOG(error) << "Refusing to change pairing authorization because durable state is unavailable."sv;
+      return false;
+    }
+    if (!fresh_state) {
+      statefile::migrate_recent_state_keys();
+    }
+    {
+      std::lock_guard<std::mutex> state_lock(statefile::state_mutex());
+      std::lock_guard<std::mutex> client_lock(client_mutex);
+      for (auto &named_cert : client_root.named_devices) {
+        if (named_cert->uuid == uuid) {
+          previously_enabled = named_cert->enabled;
+          named_cert->enabled = enabled;
+          updated = true;
+          break;
+        }
+      }
+      if (!updated) {
+        return false;
+      }
+
+      persisted = fresh_state || save_state_snapshot_locked(client_root);
+      if (!persisted && enabled && !previously_enabled) {
+        for (auto &named_cert : client_root.named_devices) {
+          if (named_cert->uuid == uuid) {
+            named_cert->enabled = false;
+            break;
+          }
+        }
+      }
+    }
+    if (!enabled || (!persisted && !previously_enabled)) {
+      revoke_paired_client_access(uuid);
+    }
+    return persisted;
   }
 
   bool set_client_sleep_allowed(std::string_view uuid, bool allowed) {

@@ -2976,16 +2976,24 @@ namespace confighttp {
         input_tree.contains("do") ||
         input_tree.contains("undo");
 
+      if (input_tree.contains("enabled") && !input_tree["enabled"].is_boolean()) {
+        bad_request(response, request, "enabled must be a boolean");
+        return;
+      }
       if (input_tree.contains("allow_sleep") && !input_tree["allow_sleep"].is_boolean()) {
         bad_request(response, request, "allow_sleep must be a boolean");
         return;
       }
-      if (!has_extended_fields && (hdr_profile.has_value() || input_tree.contains("allow_sleep"))) {
+      if (!has_extended_fields && (hdr_profile.has_value() || input_tree.contains("allow_sleep") || input_tree.contains("enabled"))) {
         bool updated = true;
         if (hdr_profile.has_value()) updated = nvhttp::set_client_hdr_profile(uuid, *hdr_profile);
         if (input_tree.contains("allow_sleep")) {
           output_tree["allow_sleep_updated"] = nvhttp::set_client_sleep_allowed(uuid, input_tree["allow_sleep"].get<bool>());
           updated = output_tree["allow_sleep_updated"].get<bool>() && updated;
+        }
+        if (input_tree.contains("enabled")) {
+          output_tree["enabled_updated"] = nvhttp::set_client_enabled(uuid, input_tree["enabled"].get<bool>());
+          updated = output_tree["enabled_updated"].get<bool>() && updated;
         }
         output_tree["status"] = updated;
         send_response(response, output_tree);
@@ -3068,6 +3076,10 @@ namespace confighttp {
       if (input_tree.contains("allow_sleep")) {
         output_tree["allow_sleep_updated"] = nvhttp::set_client_sleep_allowed(uuid, input_tree["allow_sleep"].get<bool>());
         updated = output_tree["allow_sleep_updated"].get<bool>() && updated;
+      }
+      if (input_tree.contains("enabled")) {
+        output_tree["enabled_updated"] = nvhttp::set_client_enabled(uuid, input_tree["enabled"].get<bool>());
+        updated = output_tree["enabled_updated"].get<bool>() && updated;
       }
       output_tree["status"] = updated;
       send_response(response, output_tree);
