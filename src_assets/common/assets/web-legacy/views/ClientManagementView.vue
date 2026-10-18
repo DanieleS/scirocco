@@ -994,7 +994,7 @@ const permissionMapping = {
   _all_actions: 0x07000000,
   _default: 0x03000000,
   _no: 0x00000000,
-  _all: 0x073f1f00,
+  _all: 0x077f1f00,
 } as const;
 
 const permissionGroups: PermissionGroup[] = [
@@ -1988,7 +1988,7 @@ async function saveClient(client: ClientViewModel): Promise<void> {
       name: (client.editName || '').trim(),
       hdr_profile: String(client.editHdrProfile ?? '').trim(),
       display_mode: (client.editDisplayMode || '').trim(),
-      perm: client.editPerm & permissionMapping._all,
+      perm: client.editPerm,
       allow_client_commands: !!client.editAllowClientCommands,
       do: client.editDoCommands.reduce((result: ClientCommandEntry[], entry) => {
         const cmd = String(entry?.cmd ?? '').trim();
