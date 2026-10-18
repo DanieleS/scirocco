@@ -994,7 +994,7 @@ const permissionMapping = {
   _all_actions: 0x07000000,
   _default: 0x03000000,
   _no: 0x00000000,
-  _all: 0x073f1f00,
+  _all: 0x077f1f00,
 } as const;
 
 const permissionGroups: PermissionGroup[] = [
