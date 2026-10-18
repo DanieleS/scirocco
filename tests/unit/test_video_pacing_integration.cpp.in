@@ -37,6 +37,9 @@ struct config_t {
                framerate = 120, encodingFramerate = 120000, framerateX100 = 12000;
            bool input_only = false; } monitor;
   int packetsize = 1392, encryptionFlagsEnabled = 0, minRequiredFecPackets = 2;
+  // Dynamic FEC is off in these sessions: the bitrate request goes to the encoder as is.
+  struct fec_budget_t { int set_video_kbps(int kbps) { return kbps; } };
+  std::shared_ptr<fec_budget_t> fec_budget;
 };
 struct Event { std::vector<int> raised; void raise(int value) { raised.push_back(value); } };
 struct Broadcast;
