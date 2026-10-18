@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-// The web UIs mask client permissions with a hardcoded copy of crypto::PERM::_all.
-// When a bit is added to crypto.h and the copy is not updated, the UI silently
-// strips that permission on load and on save.
+// The web UIs keep their own copies of the crypto::PERM bits for the permission toggles.
+// They send the permissions as they are (the server masks them with PERM::_all); a copy that
+// falls behind crypto.h shows or toggles the wrong bit.
 function backendPermissions(): Record<string, number> {
   const header = readFileSync(new URL('../../../../../src/crypto.h', import.meta.url), 'utf8');
   const body = /enum class PERM : uint32_t \{([\s\S]*?)\};/.exec(header)?.[1];
@@ -26,23 +26,35 @@ function backendPermissions(): Record<string, number> {
 
 const perm = backendPermissions();
 
-test('web UI permission masks match crypto::PERM::_all', () => {
-  const all = perm._all;
-  assert.ok(all & perm.telemetry_read && all & perm.unlock);
-  const sources: Array<[string, RegExp]> = [
-    ['../views/DevicesView.vue', /const PERMISSION_ALL = (0x[0-9a-f]+);/i],
-    ['../pin.html', /\b_all: (0x[0-9a-f]+),/i],
-    ['../../web-legacy/pin.html', /\b_all: (0x[0-9a-f]+),/i],
-    ['../../web-legacy/views/ClientManagementView.vue', /\b_all: (0x[0-9a-f]+),/i],
+test('web UI permission mappings match crypto::PERM', () => {
+  assert.ok(perm._all & perm.telemetry_read && perm._all & perm.unlock);
+  const sources = [
+    '../pin.html',
+    '../../web-legacy/pin.html',
+    '../../web-legacy/views/ClientManagementView.vue',
   ];
-  for (const [path, pattern] of sources) {
-    const literal = pattern.exec(readFileSync(new URL(path, import.meta.url), 'utf8'))?.[1];
-    assert.ok(literal, `${path}: permission mask not found`);
-    assert.equal(
-      Number(literal),
-      all,
-      `${path}: mask ${literal} != PERM::_all 0x${all.toString(16)}`,
-    );
+  for (const path of sources) {
+    const source = readFileSync(new URL(path, import.meta.url), 'utf8');
+    const mapping = /const permissionMapping = \{([\s\S]*?)\}/.exec(source)?.[1];
+    assert.ok(mapping, `${path}: permissionMapping not found`);
+    const entries = [...mapping.matchAll(/^\s*(\w+): (0x[0-9a-f]+),/gim)];
+    assert.ok(entries.length > 0, `${path}: permissionMapping is empty`);
+    for (const [, name, literal] of entries) {
+      const expected = name === '_all_operations' ? perm._all_opeiations : perm[name];
+      assert.equal(Number(literal), expected, `${path}: ${name}`);
+    }
+  }
+});
+
+test('web UI saves send permissions unmasked', () => {
+  for (const path of [
+    '../views/DevicesView.vue',
+    '../pin.html',
+    '../../web-legacy/pin.html',
+    '../../web-legacy/views/ClientManagementView.vue',
+  ]) {
+    const source = readFileSync(new URL(path, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /perm: [\w.]+ & /, `${path}: masks permissions on save`);
   }
 });
 

@@ -261,11 +261,10 @@ const filteredDevices = computed(() => {
 
 const PERMISSION_VIEW = 0x02000000;
 const PERMISSION_LAUNCH = 0x04000000;
-const PERMISSION_ALL = 0x077f1f00;
 
 function permissionMask(device: PairedDevice): number {
   const parsed = Number(device.perm ?? 0);
-  return Number.isFinite(parsed) ? parsed & PERMISSION_ALL : 0;
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function canViewStream(device: PairedDevice): boolean {
@@ -592,7 +591,7 @@ function updatePayload(device: PairedDevice, draft: ClientDeviceDraft): Record<s
   const payload: Record<string, unknown> = {
     uuid: device.uuid,
     name: draft.name.trim(),
-    perm: draft.permissions & PERMISSION_ALL,
+    perm: draft.permissions,
     enable_legacy_ordering: draft.enableLegacyOrdering,
     allow_client_commands: draft.allowClientCommands,
     do: draft.doCommands.map((entry) => ({ cmd: entry.command.trim(), elevated: entry.elevated })),

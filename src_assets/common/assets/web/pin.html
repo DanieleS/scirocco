@@ -740,7 +740,7 @@
             allow_client_commands: client.editAllowClientCommands,
             enable_legacy_ordering: client.editEnableLegacyOrdering,
             always_use_virtual_display: client.editAlwaysUseVirtualDisplay,
-            perm: client.editPerm & permissionMapping._all,
+            perm: client.editPerm,
             do: client.edit_do.reduce((filtered, { cmd: _cmd, elevated }) => {
               const cmd = _cmd.trim();
               if (cmd) {
