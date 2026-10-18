@@ -54,10 +54,13 @@ const lastEvent = computed<UnlockEvent | null>(() => {
   return events && events.length ? events[events.length - 1] : null;
 });
 
+// Hello-only sign-in hides Windows' own password provider, not ours; mention it only when an
+// unlock actually came back unavailable.
+const helloOnlyHint = computed(
+  () => helloOnly.value && enabled.value && lastEvent.value?.outcome === 'unavailable',
+);
+
 const statusState = computed<{ label: string; tone: StatusTone }>(() => {
-  if (helloOnly.value) {
-    return { label: t('ui.settings.unlock.status_blocked'), tone: 'warning' };
-  }
   if (enabled.value) {
     if (lastEvent.value?.outcome === 'rejected') {
       return { label: t('ui.settings.unlock.status_rejected'), tone: 'danger' };
@@ -75,7 +78,7 @@ function outcomeLabel(outcome?: string): string {
       return t('ui.settings.unlock.outcome_relocked');
     case 'rejected':
       return t('ui.settings.unlock.outcome_rejected');
-    case 'hello_only':
+    case 'hello_only': // recorded by older builds, which skipped the attempt
       return t('ui.settings.unlock.outcome_hello_only');
     case 'unavailable':
       return t('ui.settings.unlock.outcome_unavailable');
@@ -188,14 +191,8 @@ onMounted(async () => {
 
 <template>
   <div class="unlock-settings">
-    <InlineAlert
-      v-if="helloOnly"
-      class="unlock-settings__alert"
-      tone="warning"
-      announce="polite"
-      :title="t('ui.settings.unlock.status_blocked')"
-    >
-      {{ t('ui.settings.unlock.hello_only_warning') }}
+    <InlineAlert v-if="helloOnlyHint" class="unlock-settings__alert" tone="info" announce="polite">
+      {{ t('ui.settings.unlock.hello_only_hint') }}
     </InlineAlert>
 
     <article class="unlock-item">
@@ -242,7 +239,7 @@ onMounted(async () => {
           type="password"
           autocomplete="off"
           :placeholder="t('ui.settings.unlock.password_placeholder')"
-          :disabled="saving || helloOnly"
+          :disabled="saving"
           v-model="password"
           @keydown.enter.prevent="savePassword"
         />
@@ -250,7 +247,7 @@ onMounted(async () => {
           :label="t('ui.settings.unlock.check_and_save')"
           :busy="saving"
           :busy-label="t('ui.settings.unlock.saving')"
-          :disabled="!password || helloOnly"
+          :disabled="!password"
           variant="secondary"
           @click="savePassword"
         />

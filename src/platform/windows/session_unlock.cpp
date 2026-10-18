@@ -66,7 +66,8 @@ namespace platf::session_unlock {
     const wchar_t *kCredentialProvidersKey =
       L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Authentication\\Credential Providers\\";
 
-    // Hello-only sign-in: while this is 2, Windows hides every password provider, ours included.
+    // Hello-only sign-in: while this is 2, Windows hides its own password provider. Third-party
+    // providers such as ours still load, so this is only a hint when an unlock comes back unavailable.
     const wchar_t *kPasswordLessKey =
       L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\PasswordLess\\Device";
 
@@ -585,10 +586,6 @@ namespace platf::session_unlock {
     if (session_id == 0xFFFFFFFF || session_state(session_id) != lock_state::locked) {
       return;
     }
-    if (hello_only_enabled()) {
-      record_event(client_name, "hello_only", "");
-      return;
-    }
     // Do not move an outstanding relock obligation to a different user's session.
     if (g_lifecycle.owned && g_session_id != session_id) {
       return;
@@ -622,7 +619,11 @@ namespace platf::session_unlock {
       // stream teardown, until Windows unlocks or the provider proves it cannot still do so.
       start_monitor();
     } else {
-      record_event(client_name, result.code == "not-enrolled" || result.code == "unavailable" ? "unavailable" : "failed", result.code);
+      std::string detail = result.code;
+      if (result.code == "unavailable" && hello_only_enabled()) {
+        detail += " (Windows Hello-only sign-in is on)";
+      }
+      record_event(client_name, result.code == "not-enrolled" || result.code == "unavailable" ? "unavailable" : "failed", detail);
     }
   }
 

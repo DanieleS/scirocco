@@ -29,14 +29,15 @@ Edge cases:
 | Disconnect, then resume | Relock on disconnect, unlock again on resume |
 | User presses Win+L mid-stream | Left locked; no unlock mid-stream |
 | Unlocked, but no stream ever starts (launch failed, terminate request) | Relocked after about 90 s |
-| Password rejected, or Hello-only sign-in on | The stream starts on the lock screen, as today; the event is logged and shown in the Web UI |
+| Password rejected, or provider unavailable | The stream starts on the lock screen, as today; the event is logged and shown in the Web UI |
 
 Limits, inherited from how Windows works:
 
 - It only unlocks a session that was signed in and then locked. It does not sign in after a
   reboot.
 - It needs the account password, not the Windows Hello PIN.
-- "For improved security, only allow Windows Hello sign-in" must be off.
+- "For improved security, only allow Windows Hello sign-in" does not block it: that setting hides
+  Windows' own password provider, not third-party providers like ours. The host always tries.
 
 ## Architecture
 
@@ -133,7 +134,8 @@ and unregister it on `disable()`.
 - **State file:** `platf::appdata()/unlock_state.json` holds only non-secret data: `relock`
   (default true), the enrolled account's display name and the last 10 events.
   Each event is `{at, client, outcome, detail}`, where `outcome` is one of `unlocked`, `relocked`,
-  `rejected`, `hello_only`, `unavailable` or `failed`.
+  `rejected`, `unavailable` or `failed` (older builds also wrote `hello_only` when they skipped
+  the attempt; the Web UI still labels it).
 
 `status()` returns this JSON for the Web UI:
 
@@ -152,7 +154,8 @@ and unregister it on `disable()`.
 
 `hello_only` is true when the registry value
 `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\PasswordLess\Device` → `DevicePasswordLessBuildVersion`
-is 2.
+is 2. It is informational only: `before_stream()` tries the unlock regardless, and when the attempt
+ends `unavailable` while the value is 2, the event detail mentions it.
 
 ## Permission
 
@@ -205,12 +208,12 @@ summary rows.
   `network` category, after "Stream and browser security"), as a custom component like
   `DisplayRecoverySettings.vue`.
 - The section is titled **Unlock when streaming** and contains:
-  - "Unlock the PC when a stream starts": a switch with a status badge (Ready, Password rejected,
-    Blocked by Windows). Turning it off means `DELETE`. Turning it on needs the password first.
+  - "Unlock the PC when a stream starts": a switch with a status badge (Ready, Password rejected). Turning it off means `DELETE`. Turning it on needs the password first.
   - "Windows account", read-only, from `console_account`.
   - "Password", with **Check and save** (`POST`). Show the error under the field.
   - "Lock again when the stream ends": a switch that calls the settings route.
-  - A warning (`InlineAlert`, warning tone) when `hello_only` is true.
+  - A soft note (`InlineAlert`, info tone) when `hello_only` is true and the last event is
+    `unavailable`; it never disables the controls.
   - Summary rows from B: "Allowed: Thor, zefiro-test", linking to Devices, and "Last unlock" with
     the newest event and its outcome.
 - In the client permissions, the new checkbox **Unlock this PC**.
@@ -253,7 +256,7 @@ Steps:
 2. Win+L, then start a stream from that client: the session should unlock and the game appear.
    End the stream: the session locks again.
 3. Repeat with the screen off (the curtain case), with a wrong password (the badge says "Password
-   rejected" and the stream shows the lock screen), and with Hello-only sign-in on.
+   rejected" and the stream shows the lock screen), and with Hello-only sign-in on (it should still unlock).
 4. Turn it off: the provider key and the secrets are gone. Check with `reg query` on the key above.
 5. Uninstall: the same check.
 
