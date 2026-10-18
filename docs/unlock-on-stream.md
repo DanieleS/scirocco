@@ -208,12 +208,13 @@ summary rows.
   `network` category, after "Stream and browser security"), as a custom component like
   `DisplayRecoverySettings.vue`.
 - The section is titled **Unlock when streaming** and contains:
-  - "Unlock the PC when a stream starts": a switch with a status badge (Ready, Password rejected). Turning it off means `DELETE`. Turning it on needs the password first.
+  - "Unlock the PC when a stream starts": a switch with a status badge (Ready, Password rejected).
+    Turning it off means `DELETE`. Turning it on needs the password first.
   - "Windows account", read-only, from `console_account`.
   - "Password", with **Check and save** (`POST`). Show the error under the field.
   - "Lock again when the stream ends": a switch that calls the settings route.
   - A soft note (`InlineAlert`, info tone) when `hello_only` is true and the last event is
-    `unavailable`; it never disables the controls.
+    `unavailable` with detail `unavailable` (not `not-enrolled`); it never disables the controls.
   - Summary rows from B: "Allowed: Thor, zefiro-test", linking to Devices, and "Last unlock" with
     the newest event and its outcome.
 - In the client permissions, the new checkbox **Unlock this PC**.

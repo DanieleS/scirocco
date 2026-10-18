@@ -55,9 +55,14 @@ const lastEvent = computed<UnlockEvent | null>(() => {
 });
 
 // Hello-only sign-in hides Windows' own password provider, not ours; mention it only when an
-// unlock actually came back unavailable.
+// unlock actually came back unavailable. Outcome 'unavailable' also covers 'not-enrolled', so key
+// on the provider code in the detail, as session_unlock.cpp does for its Hello-only suffix.
 const helloOnlyHint = computed(
-  () => helloOnly.value && enabled.value && lastEvent.value?.outcome === 'unavailable',
+  () =>
+    helloOnly.value &&
+    enabled.value &&
+    lastEvent.value?.outcome === 'unavailable' &&
+    (lastEvent.value?.detail ?? '').startsWith('unavailable'),
 );
 
 const statusState = computed<{ label: string; tone: StatusTone }>(() => {
