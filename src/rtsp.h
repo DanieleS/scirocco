@@ -116,6 +116,7 @@ namespace rtsp_stream {
     bool secondary_game_client = false;
     // Present only when the client explicitly selected a virtual or physical display.
     std::optional<bool> client_virtual_display_override;
+    bool client_display_warning_requested = false;  ///< Ephemeral intent captured from request-time display snapshots.
     bool virtual_display;
     uint32_t scale_factor = 100;
     bool normal_vdd_capacity_rejected = false;
@@ -135,6 +136,8 @@ namespace rtsp_stream {
     std::optional<config::video_t::virtual_display_mode_e> virtual_display_mode_override;
     std::optional<config::video_t::virtual_display_layout_e> virtual_display_layout_override;
     std::optional<config::video_t::dd_t::config_option_e> dd_config_option_override;
+    bool virtual_display_preparation_override = false;  ///< Lift inherited VerifyOnly for a virtual target only.
+    std::optional<bool> display_preparation_client_virtual_override;  ///< Client choice before resumed app policy is seeded.
     std::optional<std::string> output_name_override;
     bool display_config_preapplied = false;
     // Preserve startup-owned displays and deferred setup across app replacement,

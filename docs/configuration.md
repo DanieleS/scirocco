@@ -1562,6 +1562,14 @@ this option to replace the running app immediately. The default is `true`.
     </tr>
 </table>
 
+Display preparation follows Client → Application → Global precedence. A client's
+`dd_configuration_option` override wins over the application's dedicated or generic
+preparation setting. A virtual-display selection or layout at a higher level can
+use its normal virtual layout preparation despite inherited `verify_only`.
+An explicit `verify_only` at the same or a higher level remains authoritative.
+These overrides are temporary for the session. If virtual-display creation falls
+back to a physical output, the virtual-only promotion is not applied.
+
 ### dd_resolution_option
 
 <table>
@@ -5639,8 +5647,13 @@ uses foreground window activation, Linux uses the selected KDE/KWin desktop
 session for both native Wayland and Xwayland games, and macOS activates the
 running game application. Manual applications and Desktop launches do not
 start automatic focus. A pending focus session is cancelled when its game
-session ends. Missing windows are retried until the timeout; only confirmed
-foreground activations consume the focus count.
+session ends. Window discovery lasts at most the greater of 180 seconds and
+`app_focus_timeout_secs`. Each newly eligible game window opens a focus window
+of the configured duration, capped by that discovery limit. A repeated window
+observation does not extend it. After a focus window expires, discovery can wait
+for a replacement window without activating the stale window. Only confirmed
+foreground activations consume the focus count; new windows never replenish it.
+`app_focus_exit_on_first` and an exhausted count still stop focus immediately.
 
 ### app_focus_attempts
 
@@ -5649,8 +5662,10 @@ Number of confirmed focus applications after launch, from 0 to 100. Default:
 
 ### app_focus_timeout_secs
 
-Total launch-time focus window in seconds, from 0 to 300. Default: `15`. Set to
-`0` to disable automatic focus.
+Focus window in seconds after a newly eligible game window appears, from 0 to
+300. Default: `15`. Set to `0` to disable automatic focus. The total discovery
+limit is the greater of 180 seconds and this value; a window appearing near that
+limit receives only the remaining time.
 
 ### app_focus_exit_on_first
 
