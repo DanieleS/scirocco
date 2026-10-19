@@ -1185,8 +1185,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND SUNSHINE_TEST_ENABLE_COMPONENT)
                     "${SUNSHINE_TEST_REPOSITORY_ROOT}")
             set_tests_properties(test_component_linux_machine_locale PROPERTIES LABELS "component" TIMEOUT 30)
             foreach(package_fixture IN ITEMS
-                    package_kill_mode package_metadata package_host_stop package_host_scope package_transaction_recovery package_postconfigure
-                    package_removal package_masked_host package_mask_ownership package_arch_guard package_force_backup installer_compat installer_ownership installer_real_guard installer_2_0_1 installer_hookdirs)
+                    package_kill_mode package_metadata package_host_stop package_host_scope package_cgroup_absence package_fuse_identity package_quiesce_diagnostics package_transaction_recovery package_postconfigure
+                    package_removal package_masked_host package_mask_ownership package_arch_guard package_force_backup installer_compat installer_fuse_bootstrap installer_ownership installer_real_guard installer_2_0_1 installer_hookdirs)
                 add_test(NAME "test_component_linux_${package_fixture}"
                     COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
                         "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_${package_fixture}.py"
@@ -1209,6 +1209,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND SUNSHINE_TEST_ENABLE_COMPONENT)
                 "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_machine_service_contract.py"
                 "${SUNSHINE_TEST_REPOSITORY_ROOT}")
         set_tests_properties(test_component_linux_machine_service_contract PROPERTIES LABELS "component")
+        add_test(NAME test_component_linux_machine_tray_metadata
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_machine_tray_metadata.py"
+                "${CMAKE_CXX_COMPILER}"
+                "$<TARGET_PROPERTY:nlohmann_json::nlohmann_json,INTERFACE_INCLUDE_DIRECTORIES>")
+        set_tests_properties(test_component_linux_machine_tray_metadata PROPERTIES LABELS "component")
         add_test(NAME test_component_linux_local_deploy
             COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
                 "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_local_deploy.py")
@@ -1409,6 +1415,8 @@ if(Python3_Interpreter_FOUND AND SUNSHINE_TEST_GXX)
     set_tests_properties(regression_stream_disconnect_lifecycle PROPERTIES LABELS "component" TIMEOUT 45)
     add_test(NAME regression_display_policy_adapter
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_display_policy_adapter.py")
+    add_test(NAME regression_session_display_precedence
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_session_display_precedence.py")
     add_test(NAME regression_selected_output_fallback
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_selected_output_fallback.py")
     add_test(NAME regression_virtual_display_refresh
@@ -1532,5 +1540,16 @@ if(WIN32)
                 -File "${SUNSHINE_TEST_REPOSITORY_ROOT}/packaging/windows/bootstrapper/tests/test_bootstrap_migration.ps1"
                 -OutputDirectory "${CMAKE_CURRENT_BINARY_DIR}/bootstrap-migration")
         set_tests_properties(test_script_bootstrap_migration PROPERTIES LABELS "installer;component")
+    endif()
+endif()
+
+# Managed focus has native effect ports; execute its production portable logic.
+if(Python3_Interpreter_FOUND AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_program(SUNSHINE_TEST_FOCUS_NODE NAMES node nodejs)
+    if(SUNSHINE_TEST_FOCUS_NODE)
+        add_test(NAME regression_managed_app_focus_adapters
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_managed_app_focus_adapters.py"
+                --compiler "${CMAKE_CXX_COMPILER}" --node "${SUNSHINE_TEST_FOCUS_NODE}")
+        set_tests_properties(regression_managed_app_focus_adapters PROPERTIES LABELS "component" TIMEOUT 60)
     endif()
 endif()

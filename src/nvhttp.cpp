@@ -71,6 +71,7 @@
 #include "successstory.h"
 #include "update.h"
 #include "update_notification_state.h"
+#include "session_display_policy.h"
 #include "single_flight.h"
 #include "state_storage_policy.h"
 #ifdef _WIN32
@@ -2871,6 +2872,81 @@ namespace nvhttp {
       return identity;
     }
 
+    /**
+     * @brief Capture display-warning intent from the same snapshots used by session assembly.
+     * @param args Original request; only literal virtualDisplay=0 requests this warning.
+     * @param client Authenticated paired-client snapshot used to assemble display fields.
+     * @param app Application snapshot used to assemble display fields, or no application.
+     * @return Whether removing only the explicit wire disable would request a virtual mode.
+     * @note Capture before preparation; never re-read mutable settings after admission.
+     */
+    template<class Client, class App>
+    bool client_display_warning_requested(const args_t &args, const Client &client, const App &app) {
+      if (get_arg(args, "virtualDisplay", "") != "0") return false;
+      std::optional<config::video_t::virtual_display_mode_e> mode;
+      std::optional<std::string> output;
+      bool client_requests_virtual = false;
+      if (client) {
+        client_requests_virtual = client->always_use_virtual_display;
+        if (!client->output_name_override.empty()) output = client->output_name_override;
+        mode = parse_virtual_display_mode_override(client->virtual_display_mode_override);
+      }
+      if (app) {
+        if (!mode) mode = app->virtual_display_mode_override;
+        if (!output) output = app->output_name_override;
+      }
+      auto output_choice = proc::display_policy::app_override_e::inherit;
+      if (output) {
+        const auto trimmed = boost::algorithm::trim_copy(*output);
+        output_choice = !trimmed.empty() && VDISPLAY::policy::is_virtual_display_selection(trimmed, true) ?
+                          proc::display_policy::app_override_e::virtual_display : proc::display_policy::app_override_e::physical;
+      }
+      // Layout-only and legacy app flags do not consistently request creation on
+      // both Launch and Resume. Do not attribute those paths to the wire disable.
+      const bool mode_requests_virtual = mode.value_or(config::video.virtual_display_mode) !=
+                                         config::video_t::virtual_display_mode_e::disabled;
+      return proc::display_policy::resolve_virtual_display_request(mode_requests_virtual, output_choice) || client_requests_virtual;
+    }
+
+    /**
+     * @brief Append the captured warning only after successful normal RTSP admission.
+     * @param tree Successful response; existing fields remain unchanged.
+     * @param session Prepared session with immutable request-time warning intent.
+     * @param joining_existing Whether an existing capture output is being joined.
+     */
+    void add_client_display_warning(pt::ptree &tree, const rtsp_stream::launch_session_t &session, bool joining_existing) {
+      if (!session.client_display_warning_requested || joining_existing ||
+          session.input_only || session.role != remote_session::role_e::game || session.virtual_display || session.virtual_display_failed ||
+          tree.get<int>("root.<xmlattr>.status_code", 0) != 200) {
+        return;
+      }
+  #ifdef __linux__
+      // An existing compositor scene ignores virtual-display requests altogether.
+      if (!platf::linux_display::backend().capabilities().independent_outputs) return;
+  #endif
+      tree.put("root.clientWarning", "virtual_display_disabled_by_client");
+    }
+
+    /**
+     * @brief Resolve preparation after all launch or resumed-app display fields are present.
+     * @param session Session carrying the original client display-policy choice.
+     * @param client Verified paired-client snapshot for this request.
+     */
+    void finalize_display_preparation(rtsp_stream::launch_session_t &session, const verified_client_t &client) {
+      const auto client_virtual = session.display_preparation_client_virtual_override;
+      const auto preparation = proc::display_policy::resolve_preparation(
+        config::video.dd.configuration_option,
+        session.dd_config_option_override,
+        proc::display_policy::preparation_override(client->config_overrides),
+        client_virtual.value_or(false),
+        client_virtual.value_or(proc::display_policy::virtual_display_override(session).value_or(
+          session.app_metadata && session.app_metadata->virtual_screen
+        ))
+      );
+      session.dd_config_option_override = preparation.option;
+      session.virtual_display_preparation_override = preparation.virtual_override;
+    }
+
     static std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session_from_snapshot(
       bool host_audio,
       bool input_only,
@@ -3090,11 +3166,20 @@ namespace nvhttp {
       const auto launch_appid_arg = get_arg(args, "appid", "0");
       const auto launch_appuuid_arg = get_arg(args, "appuuid", "");
       auto launch_app_ctx = proc::proc.resolve_app(launch_appid_arg, launch_appuuid_arg);
+      launch_session->client_display_warning_requested = client_display_warning_requested(args, verified_client, launch_app_ctx);
       int app_scale_factor = 100;
       launch_session->appid = launch_app_ctx ? (int) util::from_view(launch_app_ctx->id) : (int) util::from_view(launch_appid_arg);
       if (!verified_client->output_name_override.empty()) {
         launch_session->output_name_override = verified_client->output_name_override;
       }
+
+      if (const auto virtual_display_arg = args.find("virtualDisplay"); virtual_display_arg != std::end(args)) {
+        launch_session->client_virtual_display_override = util::from_view(virtual_display_arg->second) != 0;
+        if (!*launch_session->client_virtual_display_override) {
+          launch_session->virtual_display_mode_override = config::video_t::virtual_display_mode_e::disabled;
+        }
+      }
+      launch_session->display_preparation_client_virtual_override = proc::display_policy::virtual_display_override(*launch_session);
 
       const auto original_client_name = boost::algorithm::trim_copy(launch_session->client_name);
       if (!original_client_name.empty() && is_placeholder_client_name(original_client_name)) {
@@ -3126,6 +3211,7 @@ namespace nvhttp {
             metadata.has_command = !app_ctx->cmd.empty();
             metadata.has_playnite = !app_ctx->playnite_id.empty();
             metadata.playnite_fullscreen = app_ctx->playnite_fullscreen;
+            launch_session->client_display_warning_requested = client_display_warning_requested(args, verified_client, app_ctx);
             launch_session->virtual_display = app_ctx->virtual_screen;
             if (!launch_session->virtual_display_mode_override && app_ctx->virtual_display_mode_override) {
               launch_session->virtual_display_mode_override = app_ctx->virtual_display_mode_override;
@@ -3133,10 +3219,13 @@ namespace nvhttp {
             if (!launch_session->virtual_display_layout_override && app_ctx->virtual_display_layout_override) {
               launch_session->virtual_display_layout_override = app_ctx->virtual_display_layout_override;
             }
-            if (!launch_session->dd_config_option_override && app_ctx->dd_config_option_override) {
+            if (!launch_session->dd_config_option_override) {
               launch_session->dd_config_option_override = app_ctx->dd_config_option_override;
+              if (!launch_session->dd_config_option_override) {
+                launch_session->dd_config_option_override = proc::display_policy::preparation_override(app_ctx->config_overrides);
+              }
             }
-            if (app_ctx->output_name_override) {
+            if (!launch_session->output_name_override && app_ctx->output_name_override) {
               launch_session->output_name_override = *app_ctx->output_name_override;
             }
             launch_session->app_metadata = std::move(metadata);
@@ -3144,6 +3233,9 @@ namespace nvhttp {
         } catch (...) {
         }
       }
+
+      // Resolve display preparation after client and application fields.
+      finalize_display_preparation(*launch_session, verified_client);
 
       launch_session->framegen_refresh_rate.reset();
       launch_session->framegen_refresh_millihz.reset();
@@ -3189,12 +3281,6 @@ namespace nvhttp {
         launch_session->force_sdr = hdr_request.force_sdr;
       }
 #endif
-      if (const auto virtual_display_arg = args.find("virtualDisplay"); virtual_display_arg != std::end(args)) {
-        launch_session->client_virtual_display_override = util::from_view(virtual_display_arg->second) != 0;
-        if (!*launch_session->client_virtual_display_override) {
-          launch_session->virtual_display_mode_override = config::video_t::virtual_display_mode_e::disabled;
-        }
-      }
 
       const auto client_scale_factor = util::from_view(get_arg(args, "scaleFactor", "100"));
       launch_session->scale_factor = client_scale_factor > 0 &&
@@ -5420,6 +5506,7 @@ namespace nvhttp {
       revert_display_configuration = false;
       output_override_guard.disable();
       runtime_overrides_guard.disable();
+      add_client_display_warning(tree, *launch_session, !no_active_sessions || is_input_only);
     }
 
   void resume(bool &host_audio, resp_https_t response, req_https_t request, int current_appid, const bool normal_app_transition, const bool launched_from_applist) {
@@ -5640,6 +5727,7 @@ namespace nvhttp {
       try {
         if (auto app_ctx = proc::proc.resolve_app(current_appid)) {
           launch_session->appid = (int) util::from_view(app_ctx->id);
+          launch_session->client_display_warning_requested = client_display_warning_requested(args, verified_client, app_ctx);
           launch_session->gen1_framegen_fix = app_ctx->gen1_framegen_fix;
           launch_session->gen2_framegen_fix = app_ctx->gen2_framegen_fix;
           launch_session->frame_generation_enabled = app_ctx->frame_generation_enabled;
@@ -5663,10 +5751,13 @@ namespace nvhttp {
           if (!launch_session->virtual_display_layout_override && app_ctx->virtual_display_layout_override) {
             launch_session->virtual_display_layout_override = app_ctx->virtual_display_layout_override;
           }
-          if (!launch_session->dd_config_option_override && app_ctx->dd_config_option_override) {
+          if (!launch_session->dd_config_option_override) {
             launch_session->dd_config_option_override = app_ctx->dd_config_option_override;
+            if (!launch_session->dd_config_option_override) {
+              launch_session->dd_config_option_override = proc::display_policy::preparation_override(app_ctx->config_overrides);
+            }
           }
-          if (app_ctx->output_name_override) {
+          if (!launch_session->output_name_override && app_ctx->output_name_override) {
             launch_session->output_name_override = *app_ctx->output_name_override;
           }
           launch_session->app_metadata = std::move(metadata);
@@ -5676,6 +5767,9 @@ namespace nvhttp {
       } catch (...) {
       }
     }
+
+    // Resume may have populated the app policy after initial session construction.
+    finalize_display_preparation(*launch_session, verified_client);
 
 #ifdef _WIN32
     VDISPLAY::policy::retained_resume_recovery_rearm_t retained_resume_recovery_rearm;
@@ -5744,6 +5838,8 @@ namespace nvhttp {
       launch_session->virtual_display_mode_override = config::video_t::virtual_display_mode_e::disabled;
       launch_session->virtual_display_layout_override.reset();
       launch_session->dd_config_option_override.reset();
+      launch_session->virtual_display_preparation_override = false;
+      launch_session->display_preparation_client_virtual_override.reset();
       launch_session->output_name_override.reset();
       launch_session->virtual_display_guid_bytes.fill(0);
       launch_session->virtual_display_device_id.clear();
@@ -6078,6 +6174,7 @@ namespace nvhttp {
     output_override_guard.disable();
     runtime_overrides_guard.disable();
     revert_display_configuration = false;
+    add_client_display_warning(tree, *launch_session, joining_existing_game_output || is_input_only);
 
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
     system_tray::update_tray_client_connected(verified_client->name);
