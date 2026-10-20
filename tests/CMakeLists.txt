@@ -222,7 +222,7 @@ find_package(OpenSSL REQUIRED)
 
 set(SUNSHINE_TEST_SOCKET_LIBRARIES "")
 if(WIN32)
-    set(SUNSHINE_TEST_SOCKET_LIBRARIES ws2_32)
+    set(SUNSHINE_TEST_SOCKET_LIBRARIES ws2_32 mswsock)
 endif()
 
 # Header-only SDK boundaries are named targets rather than process-wide include
@@ -1453,6 +1453,13 @@ if(SUNSHINE_TEST_ENABLE_COMPONENT AND Python3_Interpreter_FOUND AND CMAKE_CXX_CO
     set_tests_properties(test_component_update_notification_tray_interface PROPERTIES LABELS "component")
 endif()
 find_program(SUNSHINE_TEST_GXX NAMES g++)
+# Standalone g++ replays cannot see a FetchContent Boost, whose headers live in per-library directories.
+set(SUNSHINE_TEST_BOOST_INCLUDE_DIRS "")
+if(FETCH_CONTENT_BOOST_USED AND Boost_SOURCE_DIR)
+    file(GLOB SUNSHINE_TEST_BOOST_INCLUDE_DIRS
+        "${Boost_SOURCE_DIR}/libs/*/include"
+        "${Boost_SOURCE_DIR}/libs/numeric/*/include")
+endif()
 if(Python3_Interpreter_FOUND AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME regression_cuda_release_policy
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_cuda_release_policy.py")
@@ -1495,7 +1502,8 @@ if(Python3_Interpreter_FOUND AND SUNSHINE_TEST_GXX)
     add_test(NAME regression_display_policy_adapter
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_display_policy_adapter.py")
     add_test(NAME regression_session_display_precedence
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_session_display_precedence.py")
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_session_display_precedence.py"
+            --include-directory "${SUNSHINE_TEST_BOOST_INCLUDE_DIRS}")
     add_test(NAME regression_selected_output_fallback
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_selected_output_fallback.py")
     add_test(NAME regression_virtual_display_refresh
