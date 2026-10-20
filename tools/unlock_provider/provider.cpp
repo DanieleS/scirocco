@@ -60,9 +60,11 @@ IFACEMETHODIMP UnlockProvider::QueryInterface(REFIID riid, void **ppv) {
 }
 
 IFACEMETHODIMP UnlockProvider::SetUsageScenario(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus, DWORD) {
-  // Only unlocking a session that is already signed in. Signing in after a reboot, CredUI and
-  // change-password are none of our business.
-  if (cpus != CPUS_UNLOCK_WORKSTATION) {
+  // Unlock, and the logon screen too. With passwordless / Windows Hello sign-in a locked session
+  // can bring LogonUI up in the CPUS_LOGON scenario rather than CPUS_UNLOCK_WORKSTATION, and
+  // handling only unlock would then never arm (no pipe, no tile) on those machines. CredUI and
+  // change-password remain none of our business. Mirrors CouchPilot's HandlesScenario.
+  if (cpus != CPUS_UNLOCK_WORKSTATION && cpus != CPUS_LOGON) {
     return E_NOTIMPL;
   }
 
