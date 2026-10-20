@@ -17,6 +17,7 @@
 #include <vector>
 
 // local includes
+#include "config_display_transition.h"
 #include "nvenc/nvenc_config.h"
 
 namespace config {
@@ -604,12 +605,17 @@ namespace config {
   );
 
   // Hot-reload helpers
-  void apply_config_now();
+  // The optional caller-scoped hook runs after effective settings are installed
+  // and before this apply dispatches REVERT. It cannot veto REVERT and must not
+  // recursively enter the configuration gate.
+  void apply_config_now(const display_transition::before_mutation_f &before_display_mutation = {});
   void mark_deferred_reload();
   void maybe_apply_deferred();
 
   // Gate helpers so session start/resume can hold a shared lock while apply holds a unique lock.
   std::shared_lock<std::shared_mutex> acquire_apply_read_gate();
+  // Catalog refresh shares the same gate and uses nonblocking admission.
+  std::shared_mutex &apply_gate_mutex();
   void record_active_adapter_config();
 
   // Runtime, non-persisted config overrides (e.g. per-application overrides).

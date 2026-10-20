@@ -348,6 +348,42 @@ sunshine_add_test_target(
     DEPENDENCIES
 )
 
+if(SUNSHINE_TEST_ENABLE_COMPONENT)
+    find_package(Threads REQUIRED)
+    sunshine_add_test_target(
+        NAME test_component_broadcast_runtime
+        CATEGORY component
+        TEST_SOURCES
+            "${CMAKE_CURRENT_LIST_DIR}/tests_main.cpp"
+            "${CMAKE_CURRENT_LIST_DIR}/unit/test_broadcast_runtime.cpp"
+        PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/stream_broadcast_runtime.cpp"
+        LINK_LIBRARIES GTest::gtest Threads::Threads nlohmann_json::nlohmann_json
+    )
+    set_tests_properties(test_component_broadcast_runtime PROPERTIES TIMEOUT 30)
+    sunshine_add_test_target(
+        NAME test_component_nvhttp_dispatch
+        CATEGORY component
+        TEST_SOURCES
+            "${CMAKE_CURRENT_LIST_DIR}/tests_main.cpp"
+            "${CMAKE_CURRENT_LIST_DIR}/unit/test_nvhttp_dispatch.cpp"
+        PRODUCT_SOURCES
+            "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/stream_broadcast_runtime.cpp"
+            "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/http_pairing_policy.cpp"
+        LINK_LIBRARIES GTest::gtest Threads::Threads nlohmann_json::nlohmann_json Boost::property_tree
+    )
+    set_tests_properties(test_component_nvhttp_dispatch PROPERTIES TIMEOUT 30)
+    sunshine_add_test_target(
+        NAME test_component_nvhttp_bitrate_policy
+        CATEGORY component
+        TEST_SOURCES
+            "${CMAKE_CURRENT_LIST_DIR}/tests_main.cpp"
+            "${CMAKE_CURRENT_LIST_DIR}/unit/test_nvhttp_bitrate_policy.cpp"
+        PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/stream_broadcast_runtime.cpp"
+        LINK_LIBRARIES GTest::gtest Threads::Threads nlohmann_json::nlohmann_json Boost::property_tree OpenSSL::Crypto
+    )
+    set_tests_properties(test_component_nvhttp_bitrate_policy PROPERTIES TIMEOUT 30)
+endif()
+
 sunshine_add_test_target(
     NAME test_fast_update_release
     CATEGORY fast
@@ -476,16 +512,26 @@ function(sunshine_register_component)
     )
 endfunction()
 
-if(SUNSHINE_TEST_ENABLE_COMPONENT AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    find_program(SUNSHINE_TEST_PYTHON_EXECUTABLE NAMES python3)
-    if(SUNSHINE_TEST_PYTHON_EXECUTABLE)
-        add_test(NAME test_component_windows_audio_role_restore
-            COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
-                "${CMAKE_CURRENT_LIST_DIR}/unit/test_windows_audio_role_restore.py"
-                "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/audio.cpp"
-                --compiler "${CMAKE_CXX_COMPILER}")
-        set_tests_properties(test_component_windows_audio_role_restore PROPERTIES LABELS "component")
-    endif()
+if(SUNSHINE_TEST_ENABLE_COMPONENT)
+    add_subdirectory(process_catalog)
+endif()
+
+find_package(Threads REQUIRED)
+sunshine_add_test_target(NAME test_component_audio_snapshot CATEGORY component
+    TEST_SOURCES "${CMAKE_CURRENT_LIST_DIR}/unit/test_audio_context.cpp"
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/audio_context.cpp"
+    DEFINITIONS SUNSHINE_ENABLE_WEBRTC
+    LINK_LIBRARIES Threads::Threads nlohmann_json::nlohmann_json)
+if(TARGET test_component_audio_snapshot)
+    add_test(NAME test_component_windows_audio_role_restore COMMAND test_component_audio_snapshot roles.)
+    add_test(NAME test_component_audio_display_snapshot COMMAND test_component_audio_snapshot context.)
+    add_test(NAME test_component_audio_display_transition COMMAND test_component_audio_snapshot transition.)
+    add_test(NAME test_component_webrtc_video_owner_unwind COMMAND test_component_audio_snapshot --owner-unwind-video)
+    add_test(NAME test_component_webrtc_audio_owner_unwind COMMAND test_component_audio_snapshot --owner-unwind-audio)
+    set_tests_properties(test_component_windows_audio_role_restore test_component_audio_display_snapshot
+        test_component_audio_display_transition
+        test_component_webrtc_video_owner_unwind test_component_webrtc_audio_owner_unwind
+        PROPERTIES LABELS "component" TIMEOUT 30)
 endif()
 
 sunshine_register_component(NAME test_component_stream_protocol TEST_SOURCE unit/test_stream.cpp
@@ -506,6 +552,7 @@ if(SUNSHINE_TEST_ENABLE_COMPONENT)
             DEPENDS unit/test_video_pacing_integration.py unit/test_video_pacing_integration.cpp.in
                 "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/stream.cpp"
                 "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/stream.h"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/stream_broadcast_runtime.h"
                 "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/stream_protocol.cpp"
                 "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/stream_protocol.h"
                 "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/pyrowave_policy.h"
@@ -515,8 +562,12 @@ if(SUNSHINE_TEST_ENABLE_COMPONENT)
         sunshine_add_test_target(NAME test_component_video_pacing_admission CATEGORY component
             TEST_SOURCES "${CMAKE_CURRENT_LIST_DIR}/tests_main.cpp" "${_pacing_fixture_dir}/video_pacing_integration.cpp"
             PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/stream_protocol.cpp"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/stream_broadcast_runtime.cpp"
             INCLUDE_DIRECTORIES "${_pacing_fixture_dir}"
-            DEFINITIONS SUNSHINE_TESTS LINK_LIBRARIES GTest::gtest)
+            DEFINITIONS SUNSHINE_TESTS
+            LINK_LIBRARIES GTest::gtest Threads::Threads nlohmann_json::nlohmann_json)
+        set_tests_properties(test_component_video_pacing_admission PROPERTIES
+            LABELS "component;supplementary" TIMEOUT 30)
     endif()
 endif()
 sunshine_register_component(NAME test_component_remote_session TEST_SOURCE unit/test_remote_session.cpp
@@ -638,6 +689,13 @@ sunshine_register_component(NAME test_component_file_handler TEST_SOURCE unit/te
 sunshine_register_component(NAME test_component_state_storage TEST_SOURCE unit/test_state_storage.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/state_storage_policy.cpp"
     LINK_LIBRARIES Boost::property_tree nlohmann_json::nlohmann_json)
+sunshine_register_component(NAME test_component_pairing_recovery TEST_SOURCE unit/test_pairing_recovery.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/pairing_recovery.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/state_storage_policy.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/crypto.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/http_pairing_policy.cpp"
+    LINK_LIBRARIES Boost::property_tree nlohmann_json::nlohmann_json OpenSSL::Crypto
+                   $<$<PLATFORM_ID:Windows>:advapi32>)
 sunshine_register_component(NAME test_component_virtual_display_scale TEST_SOURCE unit/test_virtual_display_scale.cpp)
 sunshine_register_component(NAME test_component_color_profile_policy TEST_SOURCE unit/test_color_profile_policy.cpp)
 sunshine_register_component(NAME test_component_legacy_restore_event_policy TEST_SOURCE unit/test_legacy_restore_event_policy.cpp)
@@ -957,6 +1015,16 @@ sunshine_register_component(NAME test_component_http_pairing_policy TEST_SOURCE 
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/http_pairing_policy.cpp"
                     "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/state_storage_policy.cpp"
     LINK_LIBRARIES nlohmann_json::nlohmann_json Boost::property_tree)
+sunshine_register_component(NAME test_component_tls_client_identity TEST_SOURCE unit/test_tls_client_identity.cpp
+    PRODUCT_SOURCES
+        "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/tls_client_identity.cpp"
+        "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/tls_client_identity_native.cpp"
+        "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/http_pairing_policy.cpp"
+        "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/crypto.cpp"
+    LINK_LIBRARIES nlohmann_json::nlohmann_json sunshine_test_simple_web_headers ${SUNSHINE_TEST_SOCKET_LIBRARIES})
+if(TARGET test_component_tls_client_identity)
+    set_tests_properties(test_component_tls_client_identity PROPERTIES TIMEOUT 90)
+endif()
 sunshine_register_component(NAME test_component_video_policy TEST_SOURCE unit/test_video.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/video_policy.cpp"
     LINK_LIBRARIES nlohmann_json::nlohmann_json)
@@ -1225,6 +1293,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND SUNSHINE_TEST_ENABLE_COMPONENT)
                 "${SUNSHINE_LIBVIRTUALDISPLAY_SOURCE_DIR}/tests/linux/test-vkms-peercred.py"
                 "$<TARGET_FILE:vibeshine_vkms_peercred>")
         set_tests_properties(test_component_linux_vibepollo_vkms_peercred PROPERTIES LABELS "component")
+        set(_sunshine_native_drm_source_root "${SUNSHINE_LIBVIRTUALDISPLAY_SOURCE_DIR}")
+        if(NOT _sunshine_native_drm_source_root)
+            set(_sunshine_native_drm_source_root "${SUNSHINE_TEST_REPOSITORY_ROOT}/third-party/libvirtualdisplay")
+        endif()
+        add_test(
+            NAME test_component_linux_drm_native_allocation
+            COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
+                "${_sunshine_native_drm_source_root}/tests/linux/test-native-dumb-allocation.py"
+                "${_sunshine_native_drm_source_root}/linux/vibeshine-drm")
+        set_tests_properties(test_component_linux_drm_native_allocation PROPERTIES LABELS "component" TIMEOUT 30)
+        unset(_sunshine_native_drm_source_root)
         add_test(
             NAME test_component_linux_vibepollo_drm_contract
             COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
