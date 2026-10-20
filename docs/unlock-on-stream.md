@@ -45,7 +45,7 @@ Limits, inherited from how Windows works:
 client ──launch/resume──▶ nvhttp ──before_stream()──▶ session_unlock (host, SYSTEM)
                                                           │  pipe, SYSTEM only: {"v":2,"op":"unlock","id":"GUID"}
                                                           ▼
-                                    VibepolloUnlock.dll in LogonUI (SYSTEM) ──▶ Windows unlocks
+                                    SciroccoUnlock.dll in LogonUI (SYSTEM) ──▶ Windows unlocks
 stream.cpp, last RTSP session ended ──stream_ended()──▶ session_unlock ──▶ lock the session again
 ```
 
@@ -76,7 +76,7 @@ ends run as SYSTEM:
   calls `CredentialsChanged`. The password never crosses the pipe.
 
 It is built by `tools/unlock_provider/unlock_provider.cmake`, included from
-`cmake/targets/windows.cmake`, and installed to `tools/VibepolloUnlock.dll`. It is statically
+`cmake/targets/windows.cmake`, and installed to `tools/SciroccoUnlock.dll`. It is statically
 linked: a local mingw build imports only ADVAPI32, KERNEL32, ole32, Secur32 and the system UCRT.
 
 ### Host module (done, untested on Windows)
@@ -237,7 +237,7 @@ summary rows.
 
 ## CI
 
-Add a step after the Windows build that fails if `tools/VibepolloUnlock.dll` imports anything
+Add a step after the Windows build that fails if `tools/SciroccoUnlock.dll` imports anything
 outside `KERNEL32`, `ADVAPI32`, `ole32`, `Secur32` and `api-ms-win-crt-*` (`objdump -p`). A
 dependency on the toolchain's runtime DLLs would make LogonUI fail to load it.
 

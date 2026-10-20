@@ -7,7 +7,7 @@
  *
  * - it finds the console account, checks the password with Windows, and keeps the account, the
  *   password and the SID as LSA private data (readable only by SYSTEM) under the contract's keys;
- * - it registers tools/VibepolloUnlock.dll as a credential provider while the feature is on, and
+ * - it registers tools/SciroccoUnlock.dll as a credential provider while the feature is on, and
  *   unregisters it on disable();
  * - at stream start it tells the provider to unlock over the SYSTEM-only pipe (the password never
  *   crosses it: the provider reads it from LSA itself), waits for the session to turn unlocked, and
@@ -56,7 +56,7 @@ namespace platf::session_unlock {
     using json = nlohmann::json;
 
     // The CLSID the host registers the provider under; the one definition is the contract's macro.
-    constexpr GUID kProviderClsid = {VIBEPOLLO_UNLOCK_CLSID_INIT};
+    constexpr GUID kProviderClsid = {SCIROCCO_UNLOCK_CLSID_INIT};
 
     // How long we let the session turn unlocked after the provider accepts the handoff.
     constexpr auto kUnlockPollTimeout = std::chrono::seconds(10);
@@ -106,14 +106,14 @@ namespace platf::session_unlock {
       return buf;
     }
 
-    // tools/VibepolloUnlock.dll next to sunshine.exe: the path Windows loads the provider from.
+    // tools/SciroccoUnlock.dll next to sunshine.exe: the path Windows loads the provider from.
     std::wstring provider_dll_path() {
       wchar_t path[MAX_PATH] = {};
       GetModuleFileNameW(nullptr, path, MAX_PATH);
       std::wstring exe(path);
       size_t slash = exe.find_last_of(L'\\');
       std::wstring dir = slash == std::wstring::npos ? L"." : exe.substr(0, slash);
-      return dir + L"\\tools\\" + VIBEPOLLO_UNLOCK_DLL_NAME;
+      return dir + L"\\tools\\" + SCIROCCO_UNLOCK_DLL_NAME;
     }
 
     // ---- LSA private data (the account, password and SID) ---------------------------------------
@@ -199,10 +199,10 @@ namespace platf::session_unlock {
       std::wstring dll = provider_dll_path();
 
       bool ok =
-        write_reg_sz(HKEY_CLASSES_ROOT, clsid_key, nullptr, VIBEPOLLO_UNLOCK_FRIENDLY_NAME) &&
+        write_reg_sz(HKEY_CLASSES_ROOT, clsid_key, nullptr, SCIROCCO_UNLOCK_FRIENDLY_NAME) &&
         write_reg_sz(HKEY_CLASSES_ROOT, inproc, nullptr, dll) &&
         write_reg_sz(HKEY_CLASSES_ROOT, inproc, L"ThreadingModel", L"Apartment") &&
-        write_reg_sz(HKEY_LOCAL_MACHINE, kCredentialProvidersKey + clsid, nullptr, VIBEPOLLO_UNLOCK_FRIENDLY_NAME);
+        write_reg_sz(HKEY_LOCAL_MACHINE, kCredentialProvidersKey + clsid, nullptr, SCIROCCO_UNLOCK_FRIENDLY_NAME);
 
       if (!ok) {
         // A half-done registration is worse than none: undo everything on failure.
@@ -470,7 +470,7 @@ namespace platf::session_unlock {
 
     bool feature_enabled() {
       // Set up and ready: the provider is registered and the secrets are on file.
-      return provider_registered() && !read_lsa_secret(VIBEPOLLO_UNLOCK_SID_KEY).empty();
+      return provider_registered() && !read_lsa_secret(SCIROCCO_UNLOCK_SID_KEY).empty();
     }
 
     enum class lock_state {
@@ -643,7 +643,7 @@ namespace platf::session_unlock {
     bool enabled = feature_enabled();
     out["enabled"] = enabled;
 
-    std::wstring enrolled_account = read_lsa_secret(VIBEPOLLO_UNLOCK_ACCOUNT_KEY);
+    std::wstring enrolled_account = read_lsa_secret(SCIROCCO_UNLOCK_ACCOUNT_KEY);
     {
       std::lock_guard lock(g_state_mutex);
       json state = load_state();
@@ -678,21 +678,21 @@ namespace platf::session_unlock {
     std::lock_guard lock(g_mutex);
 
     bool stored =
-      store_lsa_secret(VIBEPOLLO_UNLOCK_ACCOUNT_KEY, console.logon_name.c_str()) &&
-      store_lsa_secret(VIBEPOLLO_UNLOCK_PASSWORD_KEY, wpassword.c_str()) &&
-      store_lsa_secret(VIBEPOLLO_UNLOCK_SID_KEY, console.sid.c_str());
+      store_lsa_secret(SCIROCCO_UNLOCK_ACCOUNT_KEY, console.logon_name.c_str()) &&
+      store_lsa_secret(SCIROCCO_UNLOCK_PASSWORD_KEY, wpassword.c_str()) &&
+      store_lsa_secret(SCIROCCO_UNLOCK_SID_KEY, console.sid.c_str());
     secure_wipe(wpassword);
     if (!stored) {
-      store_lsa_secret(VIBEPOLLO_UNLOCK_ACCOUNT_KEY, nullptr);
-      store_lsa_secret(VIBEPOLLO_UNLOCK_PASSWORD_KEY, nullptr);
-      store_lsa_secret(VIBEPOLLO_UNLOCK_SID_KEY, nullptr);
+      store_lsa_secret(SCIROCCO_UNLOCK_ACCOUNT_KEY, nullptr);
+      store_lsa_secret(SCIROCCO_UNLOCK_PASSWORD_KEY, nullptr);
+      store_lsa_secret(SCIROCCO_UNLOCK_SID_KEY, nullptr);
       return "Couldn't store the unlock credentials.";
     }
 
     if (!register_provider()) {
-      store_lsa_secret(VIBEPOLLO_UNLOCK_ACCOUNT_KEY, nullptr);
-      store_lsa_secret(VIBEPOLLO_UNLOCK_PASSWORD_KEY, nullptr);
-      store_lsa_secret(VIBEPOLLO_UNLOCK_SID_KEY, nullptr);
+      store_lsa_secret(SCIROCCO_UNLOCK_ACCOUNT_KEY, nullptr);
+      store_lsa_secret(SCIROCCO_UNLOCK_PASSWORD_KEY, nullptr);
+      store_lsa_secret(SCIROCCO_UNLOCK_SID_KEY, nullptr);
       return "Couldn't register the unlock credential provider.";
     }
 
@@ -709,9 +709,9 @@ namespace platf::session_unlock {
   void disable() {
     std::lock_guard lock(g_mutex);
     unregister_provider();
-    store_lsa_secret(VIBEPOLLO_UNLOCK_ACCOUNT_KEY, nullptr);
-    store_lsa_secret(VIBEPOLLO_UNLOCK_PASSWORD_KEY, nullptr);
-    store_lsa_secret(VIBEPOLLO_UNLOCK_SID_KEY, nullptr);
+    store_lsa_secret(SCIROCCO_UNLOCK_ACCOUNT_KEY, nullptr);
+    store_lsa_secret(SCIROCCO_UNLOCK_PASSWORD_KEY, nullptr);
+    store_lsa_secret(SCIROCCO_UNLOCK_SID_KEY, nullptr);
 
     std::lock_guard state_lock(g_state_mutex);
     json state = load_state();

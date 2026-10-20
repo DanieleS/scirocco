@@ -79,7 +79,7 @@ namespace {
 }  // namespace
 
 extern "C" HRESULT __stdcall DllGetClassObject(REFCLSID rclsid, REFIID riid, void **ppv) {
-  if (rclsid != CLSID_VibepolloUnlock) {
+  if (rclsid != CLSID_SciroccoUnlock) {
     return CLASS_E_CLASSNOTAVAILABLE;
   }
   auto *factory = new (std::nothrow) ClassFactory();

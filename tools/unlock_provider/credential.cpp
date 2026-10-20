@@ -7,7 +7,7 @@
 namespace {
   // The one field: a hidden label. LogonUI requires at least one descriptor; nobody ever sees it.
   const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR s_fields[VUF_NUM_FIELDS] = {
-    {VUF_LABEL, CPFT_LARGE_TEXT, const_cast<LPWSTR>(VIBEPOLLO_UNLOCK_FRIENDLY_NAME), {}},
+    {VUF_LABEL, CPFT_LARGE_TEXT, const_cast<LPWSTR>(SCIROCCO_UNLOCK_FRIENDLY_NAME), {}},
   };
 
   void FreeSecret(PWSTR &s) {
@@ -292,7 +292,7 @@ IFACEMETHODIMP UnlockCredential::GetSerialization(CREDENTIAL_PROVIDER_GET_SERIAL
 
   if (SUCCEEDED(hr)) {
     pcpcs->ulAuthenticationPackage = authPackage;
-    pcpcs->clsidCredentialProvider = CLSID_VibepolloUnlock;
+    pcpcs->clsidCredentialProvider = CLSID_SciroccoUnlock;
     pcpcs->rgbSerialization = rgb;
     pcpcs->cbSerialization = cb;
     _submissionPending = true;

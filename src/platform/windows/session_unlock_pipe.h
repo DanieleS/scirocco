@@ -93,11 +93,11 @@ namespace platf::session_unlock::pipe_transport {
     ULONGLONG deadline = GetTickCount64() + 3000;
     HANDLE raw_pipe = INVALID_HANDLE_VALUE;
     for (int attempt = 0; attempt < 2; ++attempt) {
-      raw_pipe = CreateFileW(VIBEPOLLO_UNLOCK_PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
+      raw_pipe = CreateFileW(SCIROCCO_UNLOCK_PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
       if (raw_pipe != INVALID_HANDLE_VALUE) {
         break;
       }
-      if (GetLastError() != ERROR_PIPE_BUSY || !WaitNamedPipeW(VIBEPOLLO_UNLOCK_PIPE_NAME, 1000)) {
+      if (GetLastError() != ERROR_PIPE_BUSY || !WaitNamedPipeW(SCIROCCO_UNLOCK_PIPE_NAME, 1000)) {
         return out;
       }
     }
@@ -113,7 +113,7 @@ namespace platf::session_unlock::pipe_transport {
     if (!event.value) {
       return out;
     }
-    std::string message = std::string("{\"v\":") + std::to_string(VIBEPOLLO_UNLOCK_PROTOCOL_VERSION) +
+    std::string message = std::string("{\"v\":") + std::to_string(SCIROCCO_UNLOCK_PROTOCOL_VERSION) +
                           ",\"op\":\"" + op + "\",\"id\":\"" + request_id + "\"}";
     DWORD transferred = 0;
     out.may_unlock = std::string(op) == "unlock";

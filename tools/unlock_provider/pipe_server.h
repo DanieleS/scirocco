@@ -1,5 +1,5 @@
 // Fork addition (Scirocco). The lock-screen end of the pipe: while an unlock scenario is up it
-// listens on VIBEPOLLO_UNLOCK_PIPE_NAME, and answers one request per connection. Only SYSTEM can
+// listens on SCIROCCO_UNLOCK_PIPE_NAME, and answers one request per connection. Only SYSTEM can
 // open the pipe, and the caller's token is checked again on top of that.
 #pragma once
 

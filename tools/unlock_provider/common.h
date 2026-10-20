@@ -10,10 +10,10 @@
 #include "src/platform/windows/session_unlock_contract.h"
 
 // The provider's CLSID, from the contract.
-static const CLSID CLSID_VibepolloUnlock = {VIBEPOLLO_UNLOCK_CLSID_INIT};
+static const CLSID CLSID_SciroccoUnlock = {SCIROCCO_UNLOCK_CLSID_INIT};
 
 // The one field the hidden credential carries. LogonUI wants at least one.
-enum VIBEPOLLO_UNLOCK_FIELD_ID {
+enum SCIROCCO_UNLOCK_FIELD_ID {
   VUF_LABEL = 0,
   VUF_NUM_FIELDS,
 };

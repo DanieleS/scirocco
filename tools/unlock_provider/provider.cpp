@@ -80,7 +80,7 @@ IFACEMETHODIMP UnlockProvider::SetUsageScenario(CREDENTIAL_PROVIDER_USAGE_SCENAR
 
   // Nothing enrolled (the feature was turned off but the provider is still registered): stay
   // inert, no pipe, no tile. Otherwise bind to the enrolled user's tile and start listening.
-  std::wstring sid = ReadLsaSecret(VIBEPOLLO_UNLOCK_SID_KEY);
+  std::wstring sid = ReadLsaSecret(SCIROCCO_UNLOCK_SID_KEY);
   if (sid.empty()) {
     return S_OK;
   }
@@ -204,8 +204,8 @@ UnlockOutcome UnlockProvider::OnUnlock(const std::string &request_id) {
     return UnlockOutcome::busy;
   }
 
-  std::wstring account = ReadLsaSecret(VIBEPOLLO_UNLOCK_ACCOUNT_KEY);
-  std::wstring password = ReadLsaSecret(VIBEPOLLO_UNLOCK_PASSWORD_KEY);
+  std::wstring account = ReadLsaSecret(SCIROCCO_UNLOCK_ACCOUNT_KEY);
+  std::wstring password = ReadLsaSecret(SCIROCCO_UNLOCK_PASSWORD_KEY);
   UnlockOutcome outcome = UnlockOutcome::not_enrolled;
   if (!account.empty() && !password.empty()) {
     outcome = _cred->Arm(account.c_str(), password.c_str(), request_id) ? UnlockOutcome::ok : UnlockOutcome::busy;

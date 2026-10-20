@@ -85,7 +85,7 @@ namespace {
   }
 
   void transport() {
-    std::wstring name = L"\\\\.\\pipe\\VibepolloUnlockTest-" + std::to_wstring(GetCurrentProcessId());
+    std::wstring name = L"\\\\.\\pipe\\SciroccoUnlockTest-" + std::to_wstring(GetCurrentProcessId());
     pipe_transport::handle server(CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 512, 512, 0, nullptr));
     require(server.value != INVALID_HANDLE_VALUE, "test pipe");
     pipe_transport::handle client(CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));

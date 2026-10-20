@@ -19,26 +19,26 @@
 // The provider's COM class. Fixed: the host registers it under this CLSID, and an installed
 // provider is found and removed by it.
 //   {28F4FEFF-97F3-4EC9-8D56-192763B039C4}
-#define VIBEPOLLO_UNLOCK_CLSID_STRING L"{28F4FEFF-97F3-4EC9-8D56-192763B039C4}"
-#define VIBEPOLLO_UNLOCK_CLSID_INIT 0x28f4feff, 0x97f3, 0x4ec9, {0x8d, 0x56, 0x19, 0x27, 0x63, 0xb0, 0x39, 0xc4}
+#define SCIROCCO_UNLOCK_CLSID_STRING L"{28F4FEFF-97F3-4EC9-8D56-192763B039C4}"
+#define SCIROCCO_UNLOCK_CLSID_INIT 0x28f4feff, 0x97f3, 0x4ec9, {0x8d, 0x56, 0x19, 0x27, 0x63, 0xb0, 0x39, 0xc4}
 
 // The name Windows lists the provider under (registry only; its tile is never shown).
-#define VIBEPOLLO_UNLOCK_FRIENDLY_NAME L"Vibepollo Unlock"
+#define SCIROCCO_UNLOCK_FRIENDLY_NAME L"Scirocco Unlock"
 
 // The provider DLL, next to the host's other tools.
-#define VIBEPOLLO_UNLOCK_DLL_NAME L"VibepolloUnlock.dll"
+#define SCIROCCO_UNLOCK_DLL_NAME L"SciroccoUnlock.dll"
 
 // Served by the provider while an unlock scenario is up; message mode, SYSTEM only.
-#define VIBEPOLLO_UNLOCK_PIPE_NAME L"\\\\.\\pipe\\VibepolloUnlock"
+#define SCIROCCO_UNLOCK_PIPE_NAME L"\\\\.\\pipe\\SciroccoUnlock"
 
 // LSA private data. The "L$" prefix makes them local secrets: only SYSTEM can read them.
 //   account:  the account LogonUI signs in as, "DOMAIN\user" ("MicrosoftAccount\name@example.com"
 //             for a Microsoft account, ".\user" for a local one);
 //   password: its password;
 //   sid:      its SID as a string, so the provider binds its credential to that user's tile.
-#define VIBEPOLLO_UNLOCK_ACCOUNT_KEY L"L$VibepolloUnlockAccount"
-#define VIBEPOLLO_UNLOCK_PASSWORD_KEY L"L$VibepolloUnlockPassword"
-#define VIBEPOLLO_UNLOCK_SID_KEY L"L$VibepolloUnlockSid"
+#define SCIROCCO_UNLOCK_ACCOUNT_KEY L"L$SciroccoUnlockAccount"
+#define SCIROCCO_UNLOCK_PASSWORD_KEY L"L$SciroccoUnlockPassword"
+#define SCIROCCO_UNLOCK_SID_KEY L"L$SciroccoUnlockSid"
 
 // The wire protocol, one request and one response, both UTF-8 JSON:
 //   host → provider:  {"v":2,"op":"unlock","id":"{request GUID}"}
@@ -54,4 +54,4 @@
 // still unlock. Lost replies are ambiguous too.
 // The host must retain responsibility for a pending unlock until it observes the WTS transition
 // or receives a confirmed cancellation. A successful submission must never acknowledge cancel.
-#define VIBEPOLLO_UNLOCK_PROTOCOL_VERSION 2
+#define SCIROCCO_UNLOCK_PROTOCOL_VERSION 2

@@ -255,7 +255,7 @@ void PipeServer::Run() {
     // FIRST_PIPE_INSTANCE: if something squatted the name, this fails rather than sharing it. We
     // then never serve, and the normal sign-in methods are unaffected.
     HANDLE pipe = CreateNamedPipeW(
-      VIBEPOLLO_UNLOCK_PIPE_NAME,
+      SCIROCCO_UNLOCK_PIPE_NAME,
       PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
       PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
       1,
@@ -327,7 +327,7 @@ void PipeServer::ServeOne(HANDLE pipe, HANDLE ioEvent) {
     WriteMsg(pipe, _stopEvent, ioEvent, "{\"ok\":false,\"code\":\"bad-request\"}");
     return;
   }
-  if (v != VIBEPOLLO_UNLOCK_PROTOCOL_VERSION) {
+  if (v != SCIROCCO_UNLOCK_PROTOCOL_VERSION) {
     WriteMsg(pipe, _stopEvent, ioEvent, "{\"ok\":false,\"code\":\"bad-version\"}");
     return;
   }

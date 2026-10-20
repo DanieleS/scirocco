@@ -1,4 +1,4 @@
-LIBRARY VibepolloUnlock
+LIBRARY SciroccoUnlock
 EXPORTS
     DllGetClassObject   PRIVATE
     DllCanUnloadNow     PRIVATE
