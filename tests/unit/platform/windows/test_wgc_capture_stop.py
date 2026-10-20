@@ -53,8 +53,10 @@ for cls in ('display_wgc_ipc_vram_t','display_wgc_ipc_ram_t'):
     snapshots.append('capture_e '+cls+'::before_frame(bool cursor_visible) '+display[body:display.index(boundary,body)]+'    return capture_e::ok;\n  }')
 stream=read('src/stream.cpp');start=stream.index('    class join_deadline_t {')
 watch=stream[start:stream.index('\n  }  // namespace',start)].replace('std::chrono::seconds(10)','std::chrono::milliseconds(100)')
-start=stream.index('        auto hung_stage = std::make_shared<std::atomic<const char *>>("video thread");',stream.index('    void join(session_t &session'))
-join='      {\n'+stream[start:stream.index('      // Watchdog coverage ends',start)]
+start=stream.index('      auto hung_stage = std::make_shared<std::atomic<const char *>>("video thread");',stream.index('    void join(session_t &session'))
+join=stream[start:stream.index('      // Watchdog coverage ends',start)]
+audio=read('src/audio_context.cpp');start=audio.index('  template<class Join>\n  void join_capture_and_release')
+audio_join='namespace audio {enum class join_stage_e{video,audio,control};\n'+audio[start:audio.index('\n  void join_webrtc_capture',start)]+'\n}\n'
 code=r'''
 #include <algorithm>
 #include <array>
@@ -62,6 +64,7 @@ code=r'''
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <functional>
 #include <future>
 #include <iostream>
 #include <memory>
@@ -130,7 +133,8 @@ struct capture_thread_async_ctx_t {
 #define _WIN32
 // END
 #undef _WIN32
-struct session_t{std::thread videoThread,audioThread;safe::signal_t controlEnd;};
+// AUDIO
+struct session_t{std::thread videoThread,audioThread;safe::signal_t controlEnd;std::shared_ptr<void> audio_context_guard;};
 void join_session(session_t& session){
 // JOIN
 }
@@ -165,7 +169,7 @@ int main(){
 '''
 budgets='\n'.join(re.findall(r'^    constexpr auto kHelperHandle(?:WaitTimeout|ProgressInterval) = [^\n]+',ipc,re.M))
 if len(budgets.splitlines())!=2:raise RuntimeError('Missing production WGC helper wait budgets')
-for name,value in [('METHODS','\n'.join(methods)),('PRE',pre),('CONNECT',connect),('SEND',send),('WAIT',wait),('FORWARD','\n'.join(forward)),('SNAPSHOTS','\n'.join(snapshots)),('WATCH',watch),('END',end),('JOIN',join),('BUDGETS',budgets)]:code=code.replace('// '+name+'\n',value+'\n')
+for name,value in [('METHODS','\n'.join(methods)),('PRE',pre),('CONNECT',connect),('SEND',send),('WAIT',wait),('FORWARD','\n'.join(forward)),('SNAPSHOTS','\n'.join(snapshots)),('WATCH',watch),('END',end),('JOIN',join),('AUDIO',audio_join),('BUDGETS',budgets)]:code=code.replace('// '+name+'\n',value+'\n')
 with tempfile.TemporaryDirectory(prefix='wgc-stop-replay-') as temp:
     cpp=Path(temp)/'test.cpp';exe=Path(temp)/'test';cpp.write_text(code)
     subprocess.run([compiler,'-std=c++23','-O2','-pthread','-Wall','-Wextra',*compile_includes,str(cpp),'-o',str(exe)],check=True)

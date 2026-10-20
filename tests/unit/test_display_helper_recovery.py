@@ -76,7 +76,7 @@ clear_settlement = function(legacy_source, "void clear_disconnect_settlement()")
 stop_restore_polling = function(legacy_source, "void stop_restore_polling()")
 ping_send = function(ipc_path.read_text(), "bool send_ping(std::optional<bool> stream_owner_active)")
 config_source = (root / "src/config.cpp").read_text()
-assert "display_helper_integration::revert(true, false, dd_was_enabled && dd_disabled_now);" in config_source, \
+assert "display_helper_integration::revert(true, false, state.allow_disabled_recovery());" in config_source, \
     "configuration disable transition must be the explicit disabled-recovery caller"
 has_disabled_recovery_parameter = "allow_disabled_recovery" in integration[:integration.index("{")]
 has_recovery_ticket_parameter = "RecoveryTicket" in integration[:integration.index("{")]

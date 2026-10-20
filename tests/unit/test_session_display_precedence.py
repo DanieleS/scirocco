@@ -11,8 +11,13 @@ import tempfile
 root = pathlib.Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--source-dir', type=pathlib.Path, default=root / 'src')
+parser.add_argument('--include-directory', action='append', default=[])
 args = parser.parse_args()
 source = args.source_dir
+include_arguments = []
+for value in args.include_directory:
+    for directory in filter(None, value.split(';')):
+        include_arguments.extend(['-I', directory])
 launch = (source / 'nvhttp.cpp').read_text()
 helpers = (source / 'platform/windows/display_helper_request_helpers.cpp').read_text()
 webrtc = (source / 'webrtc_stream.cpp').read_text()
@@ -298,5 +303,5 @@ with tempfile.TemporaryDirectory(prefix='session-display-precedence-') as tempor
     cpp = directory / 'test.cpp'
     cpp.write_text(program)
     binary = directory / 'test'
-    subprocess.run(['g++', '-std=c++20', '-Wall', '-Wextra', '-Werror', '-Wno-missing-field-initializers', '-I', str(source.parent), str(cpp), str(source / 'platform/windows/display_helper_request_policy.cpp'), '-o', str(binary)], check=True)
+    subprocess.run(['g++', '-std=c++20', '-Wall', '-Wextra', '-Werror', '-Wno-missing-field-initializers', '-I', str(source.parent), *include_arguments, str(cpp), str(source / 'platform/windows/display_helper_request_policy.cpp'), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

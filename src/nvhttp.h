@@ -22,6 +22,7 @@
 
 // local includes
 #include "crypto.h"
+#include "nvhttp_server.h"
 #include "rtsp.h"
 #include "thread_safe.h"
 
@@ -95,24 +96,6 @@ namespace nvhttp {
   // under stream_lifecycle_mutex() so a fresh remote-role launch cannot enter
   // between this check and a guarded display mutation.
   bool has_remote_role_owner();
-
-  class SunshineHTTPS: public SimpleWeb::HTTPS {
-  public:
-    SunshineHTTPS(boost::asio::io_context &io_context, boost::asio::ssl::context &ctx):
-        SimpleWeb::HTTPS(io_context, ctx) {
-    }
-
-    virtual ~SunshineHTTPS() {
-      // Gracefully shutdown the TLS connection. Pretend the peer's close_notify was already
-      // received, otherwise the blocking shutdown waits for it and stalls the single HTTPS
-      // I/O thread whenever a client leaves an idle connection open.
-      if (auto *ssl = native_handle()) {
-        SSL_set_shutdown(ssl, SSL_get_shutdown(ssl) | SSL_RECEIVED_SHUTDOWN);
-      }
-      SimpleWeb::error_code ec;
-      shutdown(ec);
-    }
-  };
 
   enum class PAIR_PHASE {
     NONE,  ///< Sunshine is not in a pairing phase
