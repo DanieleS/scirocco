@@ -259,7 +259,8 @@ namespace nvhttp {
     const std::string &virtual_display_layout,
     std::optional<std::unordered_map<std::string, std::string>> config_overrides,
     bool prefer_10bit_sdr,
-    std::optional<std::string> hdr_profile
+    std::optional<std::string> hdr_profile,
+    std::optional<bool> requested_resolution_only = std::nullopt
   );
 
   /**
@@ -308,6 +309,8 @@ namespace nvhttp {
    * @brief Persist a per-client HDR color profile selection (Windows only).
    * @return True if the client was found and updated.
    */
+  bool set_client_sleep_allowed(std::string_view uuid, bool allowed);
+
   bool set_client_hdr_profile(const std::string &uuid, const std::string &hdr_profile);
 
   /**

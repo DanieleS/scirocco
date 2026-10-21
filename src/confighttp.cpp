@@ -57,6 +57,7 @@
 #include "globals.h"
 #include "http_auth.h"
 #include "httpcommon.h"
+#include "https_listener_diagnostics.h"
 #include "platform/common.h"
 #ifdef _WIN32
   #include "src/platform/windows/image_convert.h"
@@ -277,136 +278,76 @@ namespace confighttp {
   namespace fs = std::filesystem;
   using enum confighttp::StatusCode;
 
-  static std::string trim_copy(const std::string &input) {
-    auto begin = input.begin();
-    auto end = input.end();
-    while (begin != end && std::isspace(static_cast<unsigned char>(*begin))) {
-      ++begin;
-    }
-    while (end != begin && std::isspace(static_cast<unsigned char>(*(end - 1)))) {
-      --end;
-    }
-    return std::string {begin, end};
-  }
-
-  static bool file_is_regular(const fs::path &path) {
-    if (path.empty()) {
-      return false;
-    }
-    std::error_code ec;
-    return fs::exists(path, ec) && fs::is_regular_file(path, ec);
-  }
-
-  static bool resolve_cover_path_for_uuid(const std::string &uuid, fs::path &out_path) {
-    if (uuid.empty()) {
-      return false;
-    }
-
+  static std::optional<proc::ctx_t> resolve_cover_app_for_uuid(const std::string &uuid) {
+    if (uuid.empty()) return std::nullopt;
     try {
-      std::string content = file_handler::read_file(config::stream.file_apps.c_str());
-      nlohmann::json file_tree = nlohmann::json::parse(content);
-      if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
-        return false;
-      }
-
-      const fs::path cover_dir = fs::path(platf::appdata()) / "covers";
-      const fs::path config_dir = fs::path(config::stream.file_apps).parent_path();
-      const fs::path assets_dir = fs::path(SUNSHINE_ASSETS_DIR);
-
-      for (const auto &entry : file_tree["apps"]) {
-        if (!entry.is_object()) {
-          continue;
-        }
-        if (!entry.contains("uuid") || !entry["uuid"].is_string()) {
-          continue;
-        }
-        if (entry["uuid"].get<std::string>() != uuid) {
-          continue;
-        }
-
-        std::string image_path;
-        if (entry.contains("image-path") && entry["image-path"].is_string()) {
-          image_path = entry["image-path"].get<std::string>();
-        }
-        std::string playnite_id;
-        if (entry.contains("playnite-id") && entry["playnite-id"].is_string()) {
-          playnite_id = entry["playnite-id"].get<std::string>();
-        }
-
-        std::vector<fs::path> candidates;
-        std::unordered_set<std::string> seen;
-        auto push_candidate = [&](fs::path candidate) {
-          if (candidate.empty()) {
-            return;
-          }
-          auto normalized = candidate.lexically_normal();
-          std::string key = normalized.generic_string();
-#ifdef _WIN32
-          std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
-            return static_cast<char>(std::tolower(c));
-          });
-#endif
-          if (!seen.insert(key).second) {
-            return;
-          }
-          candidates.emplace_back(std::move(normalized));
-        };
-
-        auto trimmed = trim_copy(image_path);
-        auto normalized_path = trimmed;
-        std::replace(normalized_path.begin(), normalized_path.end(), '\\', '/');
-
-        if (!trimmed.empty()) {
-          fs::path direct(trimmed);
-          push_candidate(direct);
-          if (!direct.is_absolute()) {
-            if (!normalized_path.empty() && normalized_path.rfind("./", 0) == 0) {
-              fs::path rel(normalized_path.substr(2));
-              push_candidate(config_dir / rel);
-              push_candidate(assets_dir / rel);
-            }
-            push_candidate(config_dir / direct);
-            push_candidate(assets_dir / direct);
-            if (normalized_path.rfind("covers/", 0) == 0) {
-              fs::path rel(normalized_path.substr(7));
-              push_candidate(cover_dir / rel);
-            }
-            if (normalized_path.rfind("./covers/", 0) == 0) {
-              fs::path rel(normalized_path.substr(9));
-              push_candidate(cover_dir / rel);
-            }
-          }
-        }
-
-        static const std::array<const char *, 4> fallback_exts {".png", ".jpg", ".jpeg", ".webp"};
-        for (const char *ext : fallback_exts) {
-          push_candidate(cover_dir / (uuid + ext));
-        }
-        if (!playnite_id.empty()) {
-          push_candidate(cover_dir / (std::string("playnite_") + playnite_id + ".png"));
-        }
-
-        for (const auto &candidate : candidates) {
-          if (file_is_regular(candidate)) {
-            out_path = candidate;
-            return true;
-          }
-        }
-
-        fs::path fallback = assets_dir / "box.png";
-        if (file_is_regular(fallback)) {
-          out_path = fallback;
-          return true;
-        }
-
-        return false;
-      }
+      return proc::proc.resolve_app("", uuid);
     } catch (const std::exception &e) {
-      BOOST_LOG(warning) << "resolve_cover_path_for_uuid: failed for uuid '" << uuid << "': " << e.what();
+      BOOST_LOG(warning) << "resolve_cover_app_for_uuid: failed for uuid '" << uuid << "': " << e.what();
     } catch (...) {
-      BOOST_LOG(warning) << "resolve_cover_path_for_uuid: failed for uuid '" << uuid << "': unknown error";
+      BOOST_LOG(warning) << "resolve_cover_app_for_uuid: failed for uuid '" << uuid << "': unknown error";
     }
-    return false;
+    return std::nullopt;
+  }
+
+  static void attach_configured_cover_versions(nlohmann::json &apps) {
+    const auto snapshot = proc::proc.get_apps();
+    std::unordered_map<std::string, const proc::ctx_t *> by_uuid;
+    for (const auto &app : snapshot) by_uuid.emplace(app.uuid, &app);
+    for (auto &app : apps) {
+      if (!app.is_object()) continue;
+      app.erase("image-version");
+      if (!app.contains("uuid") || !app["uuid"].is_string()) continue;
+      const auto found = by_uuid.find(app["uuid"].get<std::string>());
+      if (found != by_uuid.end()) {
+        try {
+          app["image-version"] = proc::configured_app_image_version(*found->second);
+        } catch (const std::exception &) {
+          // Artwork metadata is best-effort; preserve the rest of the app list.
+        }
+      }
+    }
+  }
+
+  struct configured_cover_reply_t {
+    SimpleWeb::StatusCode code;
+    std::string body;
+    SimpleWeb::CaseInsensitiveMultimap headers;
+  };
+
+  // Authentication and UUID syntax checks stay at the route boundary. This
+  // operation owns the response/cache decision for one copied runtime app.
+  static configured_cover_reply_t configured_cover_reply(const std::string &uuid, const std::string &expected_version) {
+    configured_cover_reply_t reply {SimpleWeb::StatusCode::client_error_not_found, {}, {
+      {"Cache-Control", "private, no-store"},
+      {"X-Frame-Options", "DENY"},
+      {"Content-Security-Policy", "frame-ancestors 'none';"}}};
+    const auto fail = [&](SimpleWeb::StatusCode code, const std::string &message) {
+      reply.code = code;
+      reply.headers.emplace("Content-Type", "application/json");
+      reply.body = nlohmann::json {{"status_code", code}, {"error", message}}.dump();
+      return reply;
+    };
+    try {
+      const auto app = resolve_cover_app_for_uuid(uuid);
+      if (!app) return fail(SimpleWeb::StatusCode::client_error_not_found, "Configured cover unavailable. Moonlight may use its default image.");
+      const auto version = proc::configured_app_image_version(*app);
+      if (!expected_version.empty() && expected_version != version) {
+        return fail(SimpleWeb::StatusCode::client_error_conflict, "Cover changed. Refresh the application list and try again.");
+      }
+      const auto image = proc::read_configured_app_image(app->image_path);
+      if (!image) return fail(SimpleWeb::StatusCode::client_error_not_found, "Configured cover unavailable. Moonlight may use its default image. Use a readable PNG file no larger than 16 MiB.");
+      if (proc::configured_app_image_version(*app) != version) {
+        return fail(SimpleWeb::StatusCode::client_error_conflict, "Cover changed. Refresh the application list and try again.");
+      }
+      reply.code = SimpleWeb::StatusCode::success_ok;
+      reply.body = *image;
+      reply.headers.emplace("Content-Type", "image/png");
+      return reply;
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "Configured cover read failed: " << e.what();
+      return fail(SimpleWeb::StatusCode::client_error_not_found, "Configured cover unavailable. Moonlight may use its default image.");
+    }
   }
 
   using https_server_t = SimpleWeb::Server<SimpleWeb::HTTPS>;
@@ -564,7 +505,7 @@ namespace confighttp {
           continue;
         }
 
-        if (key.rfind("realtime_stats_", 0) == 0) {
+        if (key == "hardware_metrics" || key == "hardware_metrics_interval" || key.rfind("realtime_stats_", 0) == 0) {
           continue;
         }
 
@@ -1951,6 +1892,7 @@ namespace confighttp {
       // regenerated (the icon/cover URLs are otherwise stable and get cached by the browser).
       // Added after persistence so these transient fields never get written to apps.json.
       if (file_tree.contains("apps") && file_tree["apps"].is_array()) {
+        attach_configured_cover_versions(file_tree["apps"]);
         auto art_stamp = [](const std::string &path) -> long long {
           std::error_code ec;
           auto t = fs::last_write_time(fs::path(path), ec);
@@ -1967,12 +1909,6 @@ namespace confighttp {
                 app["playnite-icon-version"] = v;
               }
             }
-            if (app.contains("image-path") && app["image-path"].is_string()) {
-              const auto v = art_stamp(app["image-path"].get<std::string>());
-              if (v) {
-                app["image-version"] = v;
-              }
-            }
             const auto control = configurable_remote_session(app.value("uuid", ""));
             if (control != remote_session::control_e::none) {
               app["remote-session"] = control == remote_session::control_e::input ? "input" : "monitor";
@@ -1982,7 +1918,7 @@ namespace confighttp {
         }
       }
 
-      send_response(response, file_tree);
+      send_response(response, file_tree, "no-store");
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "GetApps: "sv << e.what();
       bad_request(response, request, e.what());
@@ -2218,8 +2154,7 @@ namespace confighttp {
 #endif
 
   /**
-   * @brief Serve a specific application's cover image by UUID.
-   *        Looks for files named @c uuid with a supported image extension in the covers directory.
+   * @brief Preview the configured artwork that Moonlight can receive.
    * @api_examples{/api/apps/@c uuid/cover| GET| null}
    */
   void getAppCover(resp_https_t response, req_https_t request) {
@@ -2240,40 +2175,13 @@ namespace confighttp {
       return;
     }
 
-    fs::path cover_path;
-    if (!resolve_cover_path_for_uuid(uuid, cover_path)) {
-      not_found(response, request);
-      return;
+    const auto query = request->parse_query_string();
+    const auto version = query.find("v");
+    auto reply = configured_cover_reply(uuid, version == query.end() ? "" : version->second);
+    if (reply.code != SimpleWeb::StatusCode::success_ok) {
+      reply.headers.emplace("Access-Control-Allow-Origin", get_cors_origin());
     }
-
-    std::ifstream in(cover_path, std::ios::binary);
-    if (!in) {
-      not_found(response, request);
-      return;
-    }
-
-    std::string ext = cover_path.extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
-      return static_cast<char>(std::tolower(c));
-    });
-    if (!ext.empty() && ext.front() == '.') {
-      ext.erase(ext.begin());
-    }
-
-    std::string mime = "image/png";
-    if (!ext.empty()) {
-      auto it = mime_types.find(ext);
-      if (it != mime_types.end()) {
-        mime = it->second;
-      }
-    }
-
-    SimpleWeb::CaseInsensitiveMultimap headers;
-    headers.emplace("Content-Type", mime);
-    headers.emplace("Cache-Control", "private, max-age=300");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
-    response->write(success_ok, in, headers);
+    response->write(reply.code, reply.body, reply.headers);
   }
 
   /**
@@ -2933,6 +2841,7 @@ namespace confighttp {
         input_tree.contains("display_mode") ||
         input_tree.contains("output_name_override") ||
         input_tree.contains("always_use_virtual_display") ||
+        input_tree.contains("requested_resolution_only") ||
         input_tree.contains("virtual_display_mode") ||
         input_tree.contains("virtual_display_layout") ||
         input_tree.contains("config_overrides") ||
@@ -2943,8 +2852,18 @@ namespace confighttp {
         input_tree.contains("do") ||
         input_tree.contains("undo");
 
-      if (!has_extended_fields && hdr_profile.has_value()) {
-        output_tree["status"] = nvhttp::set_client_hdr_profile(uuid, hdr_profile.value());
+      if (input_tree.contains("allow_sleep") && !input_tree["allow_sleep"].is_boolean()) {
+        bad_request(response, request, "allow_sleep must be a boolean");
+        return;
+      }
+      if (!has_extended_fields && (hdr_profile.has_value() || input_tree.contains("allow_sleep"))) {
+        bool updated = true;
+        if (hdr_profile.has_value()) updated = nvhttp::set_client_hdr_profile(uuid, *hdr_profile);
+        if (input_tree.contains("allow_sleep")) {
+          output_tree["allow_sleep_updated"] = nvhttp::set_client_sleep_allowed(uuid, input_tree["allow_sleep"].get<bool>());
+          updated = output_tree["allow_sleep_updated"].get<bool>() && updated;
+        }
+        output_tree["status"] = updated;
         send_response(response, output_tree);
         return;
       }
@@ -3005,7 +2924,7 @@ namespace confighttp {
         virtual_display_layout,
         prefer_10bit_sdr
       );
-      if (config_overrides.has_value() || hdr_profile.has_value()) {
+      if (config_overrides.has_value() || hdr_profile.has_value() || input_tree.contains("requested_resolution_only")) {
         updated = nvhttp::update_device_info(
           uuid,
           name,
@@ -3016,9 +2935,15 @@ namespace confighttp {
           virtual_display_layout,
           std::move(config_overrides),
           prefer_10bit_sdr,
-          hdr_profile
+          hdr_profile,
+          input_tree.contains("requested_resolution_only") ?
+            std::optional<bool> {input_tree.at("requested_resolution_only").get<bool>()} : std::nullopt
         )
                   && updated;
+      }
+      if (input_tree.contains("allow_sleep")) {
+        output_tree["allow_sleep_updated"] = nvhttp::set_client_sleep_allowed(uuid, input_tree["allow_sleep"].get<bool>());
+        updated = output_tree["allow_sleep_updated"].get<bool>() && updated;
       }
       output_tree["status"] = updated;
       send_response(response, output_tree);
@@ -6646,6 +6571,9 @@ namespace confighttp {
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
 
     https_server_t server(config::nvhttp.cert, config::nvhttp.pkey);
+    configure_https_listener_diagnostics(server, [](std::string_view message) {
+      BOOST_LOG(warning) << message;
+    });
     server.default_resource["DELETE"] = [](resp_https_t response, req_https_t request) {
       bad_request(response, request);
     };

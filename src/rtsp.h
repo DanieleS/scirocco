@@ -82,6 +82,7 @@ namespace rtsp_stream {
     int fps;
     int gcmap;
     bool gcpersist = false;
+    input::guide_button_config_t guide_button;
     int playstation_gamepad_mask {};
 
     struct app_metadata_t {
@@ -111,6 +112,8 @@ namespace rtsp_stream {
     // Moonlight's VRR request passed its launch-time VSync, display-refresh,
     // and adaptive-headroom checks. The renderer may still fall back later.
     bool client_vrr_requested = false;
+    bool requested_resolution_only = false;
+    std::string virtual_display_catalog_error;
     bool client_display_mode_override;
     // Exact refresh requested by a per-client display-mode override, expressed
     // in millihertz. The existing fps field remains the legacy stream cadence.
@@ -382,6 +385,8 @@ namespace rtsp_stream {
    * @brief Get the client UUIDs for all active sessions.
    */
   std::list<std::string> get_all_session_client_uuids();
+  // Read-only observation: never clear, stop or join sessions.
+  bool has_running_video_for_client(std::string_view client_uuid);
 
   /**
    * @brief Stop any active sessions for a given client UUID.
