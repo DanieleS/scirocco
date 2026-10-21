@@ -13,7 +13,15 @@ namespace nvhttp::power_action {
   bool native_sleep_supported() {
 #ifdef _WIN32
     SYSTEM_POWER_CAPABILITIES caps {};
-    return GetPwrCapabilities(&caps) && (caps.SystemS1 || caps.SystemS2 || caps.SystemS3 || caps.AoAc);
+    if (!GetPwrCapabilities(&caps)) {
+      return false;
+    }
+    // MinGW's SYSTEM_POWER_CAPABILITIES predates the AoAc (modern standby) member.
+    bool modern_standby = false;
+    if constexpr (requires { caps.AoAc; }) {
+      modern_standby = caps.AoAc;
+    }
+    return caps.SystemS1 || caps.SystemS2 || caps.SystemS3 || modern_standby;
 #else
     // Linux's machine host needs a dedicated privileged broker operation.
     // Never substitute a shell command or an interactive elevation prompt.

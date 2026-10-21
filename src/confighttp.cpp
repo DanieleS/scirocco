@@ -4695,7 +4695,7 @@ namespace confighttp {
         limit = 20;
       }
     }
-    if (trim_copy(term).empty()) {
+    if (boost::algorithm::trim_copy(term).empty()) {
       bad_request(response, request, "Missing search term");
       return;
     }
