@@ -1278,7 +1278,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND SUNSHINE_TEST_ENABLE_COMPONENT)
                 "${SUNSHINE_TEST_REPOSITORY_ROOT}")
         set_tests_properties(test_component_linux_machine_service_contract PROPERTIES LABELS "component")
         add_test(NAME test_component_linux_machine_tray_metadata
-            COMMAND "${Python3_EXECUTABLE}"
+            COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
                 "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_machine_tray_metadata.py"
                 "${CMAKE_CXX_COMPILER}"
                 "$<TARGET_PROPERTY:nlohmann_json::nlohmann_json,INTERFACE_INCLUDE_DIRECTORIES>")
