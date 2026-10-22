@@ -1,0 +1,23 @@
+Metadata-Version: 2.4
+Name: Sunshine
+Version: 0.0.0
+Summary: Helper scripts for Sunshine
+Author-email: LizardByte <lizardbyte@users.noreply.github.com>
+License: GPL-3.0-only
+Project-URL: Homepage, https://app.lizardbyte.dev/Sunshine
+Project-URL: Repository, https://github.com/LizardByte/Sunshine
+Project-URL: Issues, https://github.com/LizardByte/Sunshine/issues
+Requires-Python: >=3.14
+License-File: LICENSE
+License-File: NOTICE
+Provides-Extra: glad
+Requires-Dist: glad2 @ file:./third-party/glad ; extra == "glad"
+Requires-Dist: setuptools<82; extra == "glad"
+Provides-Extra: flatpak
+Requires-Dist: flatpak_pip_generator @ file:./packaging/linux/flatpak/deps/flatpak-builder-tools/pip ; extra == "flatpak"
+Provides-Extra: lint
+Requires-Dist: clang-format==20.*; extra == "lint"
+Requires-Dist: flake8==7.3.0; extra == "lint"
+Provides-Extra: locale
+Requires-Dist: Babel==2.18.0; extra == "locale"
+Dynamic: license-file

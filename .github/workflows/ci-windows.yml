@@ -861,9 +861,11 @@ jobs:
           echo "SciroccoUnlock.dll imports only system libraries."
 
       # Saved from master (shared with every PR and tag) and from PRs (reused by their reruns and
-      # fix commits). Tag caches are not saved: no other ref could restore them.
+      # fix commits). Tag caches are not saved: no other ref could restore them. Nor are those of
+      # cancelled runs (a master push cancels the previous warm-up): restore picks the newest
+      # entry, so a cache cut short (98 MB instead of 470) hid the complete one before it.
       - name: Save compiler cache
-        if: always() && steps.ccache-restore.outcome == 'success' && github.ref_type != 'tag'
+        if: "!cancelled() && steps.ccache-restore.outcome == 'success' && github.ref_type != 'tag'"
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: ${{ github.workspace }}\.ccache
