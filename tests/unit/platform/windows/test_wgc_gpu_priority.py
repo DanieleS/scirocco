@@ -55,6 +55,8 @@ using BOOL = bool;
 using HANDLE = void *;
 using HMODULE = void *;
 using DPI_AWARENESS_CONTEXT = void *;
+#undef WINAPI
+#undef __stdcall
 #define WINAPI
 #define __stdcall
 #define SUCCEEDED(status) ((status) >= 0)
