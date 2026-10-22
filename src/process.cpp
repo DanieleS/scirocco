@@ -5,6 +5,7 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 // standard includes
+#include "host_stream_control.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -100,6 +101,7 @@
 #include "nvhttp.h"
 #include "prep_command_lifetime.h"
 #include "process.h"
+#include "remote_monitor_profile_policy.h"
 #ifdef _WIN32
   #include "platform/windows/virtual_display.h"
   #include "platform/windows/virtual_display_legacy.h"
@@ -1367,6 +1369,18 @@ namespace proc {
 #endif
   }
   int proc_t::execute(const ctx_t &app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session, bool config_read_gate_held) {
+    // Callers serialize app changes with lifecycle. Admission never waits, so
+    // a lifecycle-held caller can reject terminal cleanup without lock inversion.
+    // New startup is refused even from terminal-owned nested cleanup; an execute
+    // admitted before closure keeps its owner through startup and cleanup tails.
+    host_stream_control::start_guard_t admission {host_stream_control::request_ticket()};
+    if (!admission) return 503;
+    // Reject before process/display state changes; Monitor profiles are
+    // admitted only by the authenticated paired-client role path.
+    if (app.remote_monitor_profile) {
+      BOOST_LOG(error) << "Remote Monitor profiles require the paired-client Monitor launch path.";
+      return 400;
+    }
 #ifdef _WIN32
     std::optional<std::filesystem::path> resolved_lossless_exe_path;
     std::string resolved_lossless_exe_utf8;
@@ -1623,14 +1637,18 @@ namespace proc {
           effective_virtual_display_mode == config::video_t::virtual_display_mode_e::shared;
 
         if (use_shared_display) {
-          if (http::shared_virtual_display_guid.empty()) {
+          const auto persisted_shared_guid=http::shared_virtual_display_guid_snapshot();
+          if (persisted_shared_guid.empty()) {
             device_uuid = uuid_util::uuid_t::generate();
             device_uuid_str = device_uuid.string();
-            http::shared_virtual_display_guid = device_uuid_str;
+            if(!http::set_shared_virtual_display_guid(device_uuid_str)) {
+              BOOST_LOG(error) << "Shared display identity is retained by exact target borrowers.";
+              return 409;
+            }
             nvhttp::save_state();
             BOOST_LOG(info) << "Generated new shared virtual display GUID: " << device_uuid_str;
           } else {
-            device_uuid_str = http::shared_virtual_display_guid;
+            device_uuid_str = persisted_shared_guid;
             device_uuid = uuid_util::uuid_t::parse(device_uuid_str);
             BOOST_LOG(info) << "Reusing shared virtual display GUID: " << device_uuid_str;
           }
@@ -2726,6 +2744,8 @@ namespace proc {
   }
 
   int proc_t::running() {
+    host_stream_control::activity_guard_t activity;
+    if (!activity) return current_app_id();
 #ifndef _WIN32
     // Detached launchers still need collecting, but other children retain
     // their own wait status (Boost, provider scans and GLib helpers).
@@ -3143,6 +3163,8 @@ namespace proc {
     bool stream_lifecycle_lock_held,
     bool config_read_gate_held
   ) {
+    host_stream_control::activity_guard_t activity;
+    if (!activity) return;
 #ifdef __linux__
     // This owner represents a running-Steam handoff. Dropping it when the
     // app ends also prevents a later SDR launch from retaining HDR policy.
@@ -3606,6 +3628,58 @@ namespace proc {
     return ss.str();
   }
 
+
+  std::vector<std::string> configured_app_uuids(const nlohmann::json &file_tree) {
+    std::vector<std::string> result;
+    if (file_tree.contains("apps") && file_tree["apps"].is_array()) {
+      for (const auto &app : file_tree["apps"]) {
+        // This parser accepts literal JSON string UUIDs, without expansion.
+        if (app.is_object() && app.contains("uuid") && app["uuid"].is_string()) result.push_back(app["uuid"].get<std::string>());
+      }
+    }
+    return result;
+  }
+
+  std::string_view configured_monitor_profile_error_from_file(const nlohmann::json &app, const nlohmann::json &file_tree, const std::string_view content) {
+    (void) content;
+    if (!remote_session::marked_monitor_profile(app)) return {};
+    const auto identities = configured_app_uuids(file_tree);
+    std::vector<std::string_view> views;
+    for (const auto &uuid : identities) views.push_back(uuid);
+    return remote_session::monitor_profile_json_error(app, views);
+  }
+
+  std::string_view configured_monitor_profile_error(const nlohmann::json &app, const nlohmann::json &file_tree) {
+    if (!remote_session::marked_monitor_profile(app)) return {};
+    return configured_monitor_profile_error_from_file(app, file_tree, file_tree.dump());
+  }
+
+  std::string_view monitor_profile_changes_error(const nlohmann::json &before, const nlohmann::json &after, const std::string_view before_file) {
+    if (!after.contains("apps") || !after["apps"].is_array()) return {};
+    if (std::none_of(after["apps"].begin(), after["apps"].end(), remote_session::marked_monitor_profile)) return {};
+    const auto before_ids = configured_app_uuids(before);
+    std::vector<std::string_view> before_views;
+    for (const auto &uuid : before_ids) before_views.push_back(uuid);
+    for (const auto &app : after["apps"]) {
+      const auto error = configured_monitor_profile_error(app, after);
+      if (error.empty()) continue;
+      // Existing invalid marked rows stay available for explicit repair.
+      // An unrelated ordinary edit may preserve them, but cannot invalidate
+      // a previously valid profile by changing an effective ordinary UUID.
+      bool unchanged_invalid = false;
+      if (before.contains("apps") && before["apps"].is_array()) {
+        for (const auto &old : before["apps"]) {
+          if (old == app && remote_session::monitor_profile_json_error(old, before_views) == error) {
+            unchanged_invalid = true;
+            break;
+          }
+        }
+      }
+      if (!unchanged_invalid) return error;
+    }
+    return {};
+  }
+
   /**
    * @brief Validates a path whether it is a valid PNG.
    * @param path The path to the PNG file.
@@ -3622,7 +3696,7 @@ namespace proc {
   }
 
   namespace {
-    constexpr std::size_t maximum_machine_cover_bytes = 16U * 1024U * 1024U;
+    constexpr std::size_t maximum_machine_cover_bytes = catalog::maximum_image_bytes;
 
     [[maybe_unused]] bool machine_host_runtime() {
       const char *value = std::getenv("VIBEPOLLO_MACHINE_HOST");
@@ -3812,6 +3886,24 @@ namespace proc {
       return std::nullopt;
     }
     return bytes;
+  }
+
+  std::optional<std::string> read_configured_app_image(const std::string &image_path) {
+    return catalog::read_configured_image(
+      image_path, SUNSHINE_ASSETS_DIR, read_image_for_validation, read_validated_app_image);
+  }
+
+  std::string configured_app_image_version(const ctx_t &app) {
+    return catalog::configured_image_version(
+      app.image_path, SUNSHINE_ASSETS_DIR, app.art_version, read_image_for_validation,
+      [](const std::string &path) -> std::optional<std::string> {
+        std::error_code ec;
+        const auto modified = std::filesystem::last_write_time(path, ec);
+        if (ec) return std::nullopt;
+        const auto size = std::filesystem::file_size(path, ec);
+        if (ec) return std::nullopt;
+        return std::to_string(modified.time_since_epoch().count()) + "-" + std::to_string(size);
+      });
   }
 
   std::optional<std::string> calculate_sha256(const std::string &filename) {
@@ -4101,6 +4193,28 @@ namespace proc {
     return catalog::calculate_ids(app_name, app_uuid, legacy_image_identity, index);
   }
 
+  void assign_unique_generated_app_id(ctx_t &ctx, int index, std::set<std::string> &ids, const std::vector<ctx_t> &apps) {
+    const auto [primary, indexed] = calculate_app_id(ctx.name, ctx.uuid, ctx.image_path, index);
+    const auto available = [&ids, &apps](const std::string &id) {
+      std::int32_t value {};
+      const auto [end, error] = std::from_chars(id.data(), id.data() + id.size(), value);
+      return error == std::errc {} && end == id.data() + id.size() && value > 0 &&
+             remote_session::identify(value) == remote_session::control_e::none && !ids.contains(id) &&
+             !resolve_app_from_snapshot(apps, id, "");
+    };
+    ctx.id = available(primary) ? primary : indexed;
+    // Retain configured aliases that still resolve, including after partial
+    // parsing skips pruning. Preserve nonconflicting primary/indexed IDs;
+    // do not retain an unavailable candidate as a native-row alias.
+    std::uint32_t candidate {};
+    std::from_chars(ctx.id.data(), ctx.id.data() + ctx.id.size(), candidate);
+    while (!available(ctx.id)) {
+      candidate = candidate >= std::numeric_limits<std::int32_t>::max() ? 1 : candidate + 1;
+      ctx.id = std::to_string(candidate);
+    }
+    ids.insert(ctx.id);
+  }
+
   /**
    * @brief Migrate the applications stored in the file tree by merging in a new app.
    *
@@ -4125,6 +4239,9 @@ namespace proc {
     std::string new_app_uuid;
 
     if (inputTree_p) {
+      if (const auto error = remote_session::monitor_profile_json_error(*inputTree_p, (*fileTree_p)["apps"]); !error.empty()) {
+        throw std::invalid_argument(std::string {error});
+      }
       // If the input contains a non-empty "uuid", use it; otherwise generate one.
       if (inputTree_p->contains("uuid") && !(*inputTree_p)["uuid"].get<std::string>().empty()) {
         new_app_uuid = (*inputTree_p)["uuid"].get<std::string>();
@@ -4152,6 +4269,12 @@ namespace proc {
     nlohmann::json newApps = nlohmann::json::array();
     if (fileTree_p->contains("apps") && (*fileTree_p)["apps"].is_array()) {
       for (auto &app : (*fileTree_p)["apps"]) {
+        // Preserve invalid marked entries for explicit repair. Migration must
+        // neither generate their identity nor reinterpret them as normal apps.
+        if (!remote_session::monitor_profile_json_error(app, (*fileTree_p)["apps"]).empty()) {
+          newApps.push_back(app);
+          continue;
+        }
         // For apps without a UUID, generate one and remove "launching".
         if (!app.contains("uuid") || app["uuid"].get<std::string>().empty()) {
           app["uuid"] = uuid_util::uuid_t::generate().string();
@@ -4213,6 +4336,7 @@ namespace proc {
 
       // Walk through each app and convert legacy string values.
       for (auto &app : fileTree["apps"]) {
+        if (!configured_monitor_profile_error(app, fileTree).empty()) continue;
         for (const auto &key : boolean_keys) {
           if (app.contains(key)) {
             auto &_key = app[key];
@@ -4284,7 +4408,12 @@ namespace proc {
     }
 
     if (file_version < last_version) {
+      const auto previous_file = file_handler::read_file(fileName.c_str());
+      const auto previous = nlohmann::json::parse(previous_file);
       migration_v2(fileTree);
+      if (const auto error = monitor_profile_changes_error(previous, fileTree, previous_file); !error.empty()) {
+        throw std::invalid_argument(std::string {error});
+      }
       file_handler::write_file(fileName.c_str(), fileTree.dump(4));
     }
   }
@@ -4351,8 +4480,14 @@ namespace proc {
 
         // Iterate over each application in the "apps" array.
         for (auto &app_node : tree["apps"]) {
+          const int json_index = i++;
+          if (const auto error = configured_monitor_profile_error(app_node, tree); !error.empty()) {
+            BOOST_LOG(warning) << "Skipping configured Remote Monitor profile at JSON index " << json_index << ": " << error;
+            continue;
+          }
           proc::ctx_t ctx {};
-          ctx.idx = std::to_string(i);
+          ctx.configured_index = static_cast<std::size_t>(json_index);
+          ctx.idx = std::to_string(json_index);
           ctx.uuid = app_node.at("uuid");
 
           // Build the list of preparation commands.
@@ -4486,6 +4621,9 @@ namespace proc {
         ctx.frame_gen_limiter_fix = util::get_non_string_json_value<bool>(app_node, "frame-gen-limiter-fix", util::get_non_string_json_value<bool>(app_node, "dlss-framegen-limiter-fix", false));
         ctx.elevated = util::get_non_string_json_value<bool>(app_node, "elevated", false);
         ctx.virtual_screen = util::get_non_string_json_value<bool>(app_node, "virtual-screen", false);
+        ctx.remote_monitor_profile = app_node.contains("remote-monitor-profile") &&
+          app_node["remote-monitor-profile"].is_boolean() && app_node["remote-monitor-profile"].get<bool>();
+        if (ctx.remote_monitor_profile) ctx.monitor_target = remote_session::monitor_target_from_json(app_node);
         ctx.auto_detach = util::get_non_string_json_value<bool>(app_node, "auto-detach", true);
         ctx.wait_all = util::get_non_string_json_value<bool>(app_node, "wait-all", true);
         ctx.exit_timeout = std::chrono::seconds {util::get_non_string_json_value<int>(app_node, "exit-timeout", 10)};
@@ -4662,7 +4800,7 @@ namespace proc {
         }
 
         // Calculate a unique application id.
-        assign_compatible_app_id(ctx, name, i++, ids, app_id_alias_state, active_app_uuids, app_id_alias_state_changed);
+        assign_compatible_app_id(ctx, name, json_index, ids, app_id_alias_state, active_app_uuids, app_id_alias_state_changed);
 
         ctx.name = std::move(name);
         ctx.prep_cmds = std::move(prep_cmds);
@@ -4728,15 +4866,7 @@ namespace proc {
       ctx.exit_timeout = 5s;
 
       // Calculate unique ID
-      auto possible_ids = calculate_app_id(ctx.name, ctx.uuid, ctx.image_path, i++);
-      if (ids.count(std::get<0>(possible_ids)) == 0) {
-        // Avoid using index to generate id if possible
-        ctx.id = std::get<0>(possible_ids);
-      } else {
-        // Fallback to include index on collision
-        ctx.id = std::get<1>(possible_ids);
-      }
-      ids.insert(ctx.id);
+      assign_unique_generated_app_id(ctx, i++, ids, apps);
 
       apps.emplace_back(std::move(ctx));
     }
@@ -4749,15 +4879,7 @@ namespace proc {
       });
       ctx.idx = std::to_string(i);
 
-      auto possible_ids = calculate_app_id(ctx.name, ctx.uuid, ctx.image_path, i++);
-      if (ids.count(std::get<0>(possible_ids)) == 0) {
-        // Avoid using index to generate id if possible
-        ctx.id = std::get<0>(possible_ids);
-      } else {
-        // Fallback to include index on collision
-        ctx.id = std::get<1>(possible_ids);
-      }
-      ids.insert(ctx.id);
+      assign_unique_generated_app_id(ctx, i++, ids, apps);
 
       apps.emplace_back(std::move(ctx));
     }
@@ -4783,15 +4905,7 @@ namespace proc {
         ctx.wait_all = true;
         ctx.exit_timeout = 5s;
 
-        auto possible_ids = calculate_app_id(ctx.name, ctx.uuid, ctx.image_path, i++);
-        if (ids.count(std::get<0>(possible_ids)) == 0) {
-          // Avoid using index to generate id if possible
-          ctx.id = std::get<0>(possible_ids);
-        } else {
-          // Fallback to include index on collision
-          ctx.id = std::get<1>(possible_ids);
-        }
-        ids.insert(ctx.id);
+        assign_unique_generated_app_id(ctx, i++, ids, apps);
 
         input_only_app_id_str = ctx.id;
         input_only_app_id = util::from_view(ctx.id);
@@ -4819,15 +4933,7 @@ namespace proc {
       ctx.wait_all = true;
       ctx.exit_timeout = 5s;
 
-      auto possible_ids = calculate_app_id(ctx.name, ctx.uuid, ctx.image_path, i++);
-      if (ids.count(std::get<0>(possible_ids)) == 0) {
-        // Avoid using index to generate id if possible
-        ctx.id = std::get<0>(possible_ids);
-      } else {
-        // Fallback to include index on collision
-        ctx.id = std::get<1>(possible_ids);
-      }
-      // ids.insert(ctx.id);
+      assign_unique_generated_app_id(ctx, i++, ids, apps);
 
       terminate_app_id_str = ctx.id;
       terminate_app_id = util::from_view(ctx.id);

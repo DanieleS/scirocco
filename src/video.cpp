@@ -1285,14 +1285,33 @@ namespace video {
         return {};
       }
 
+      if (output_identity_failed) {
+        return {};
+      }
+
       auto result = device->nvenc->encode_frame(frame_index, force_idr);
       force_idr = false;
+      if (!result.data.empty() && result.frame_index != frame_index) {
+        // Native NVENC has one synchronous input/output transaction. Delivering
+        // another index would attribute this picture's timestamps to other pixels.
+        // Keep this failure latched until the client stream ends; rebuilding the
+        // encoder alone does not establish a decoder reset or picture continuity.
+        BOOST_LOG(error) << "NvEnc: refusing output with frame index " << result.frame_index
+                         << " for submitted frame " << frame_index;
+        output_identity_failed = true;
+        return {};
+      }
       return result;
+    }
+
+    bool has_output_identity_failure() const {
+      return output_identity_failed;
     }
 
   private:
     std::unique_ptr<platf::nvenc_encode_device_t> device;
     bool force_idr = false;
+    bool output_identity_failed = false;
   };
 
   class amf_encode_session_t: public encode_session_t {
@@ -3114,6 +3133,7 @@ namespace video {
         return;
       }
 
+      if (capture_config.capture_target_valid && !capture_config.capture_target_valid()) return;
       const auto exact_output = capture_config.capture_source == capture_source_e::exact_output;
       const auto required_output = exact_output ? capture_config.capture_output : std::nullopt;
       const bool log_display_retry = policy::should_log_display_retry(display_retry_failures);
@@ -3471,6 +3491,15 @@ namespace video {
             }
 #endif
 
+            // Metadata was observed by this exact capture instance. Let it
+            // advance that observation only after every old encoder released
+            // its display reference, then republish it for encoder selection.
+            if (disp->commit_pending_capture_metadata()) {
+              display_wp = disp;
+              reinit_event.reset();
+              continue;
+            }
+
             while (auto pending_context = capture_ctx_queue->pop(0ms)) {
               if (pending_context->images->running()) {
                 capture_ctxs.emplace_back(std::move(*pending_context));
@@ -3489,6 +3518,7 @@ namespace video {
               disp.reset();
 
               // Refresh display names since a display removal might have caused the reinitialization
+              if (capture_ctxs.front().config.capture_target_valid && !capture_ctxs.front().config.capture_target_valid()) return;
               const auto exact_output = capture_ctxs.front().config.capture_source == capture_source_e::exact_output;
               const auto required_output = exact_output ? capture_ctxs.front().config.capture_output : std::nullopt;
               refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, proc::proc.display_name, required_output, exact_output, policy::should_log_display_retry(display_retry_failures));
@@ -3651,10 +3681,6 @@ namespace video {
     if (encoded_frame.data.empty()) {
       BOOST_LOG(error) << "NvENC returned empty packet";
       return -1;
-    }
-
-    if (frame_nr != encoded_frame.frame_index) {
-      BOOST_LOG(error) << "NvENC frame index mismatch " << frame_nr << " " << encoded_frame.frame_index;
     }
 
     auto packet = std::make_unique<packet_raw_generic>(std::move(encoded_frame.data), encoded_frame.frame_index, encoded_frame.idr);
@@ -4989,6 +5015,7 @@ namespace video {
 
   enum class encode_run_result_e {
     completed,
+    native_nvenc_identity_failed,
     native_amf_failed,
     temporarily_busy,
     initialization_failed,
@@ -5658,6 +5685,13 @@ namespace video {
       // This is useful for KVM switch scenarios where mouse may disappear during streaming
       platf::enable_mouse_keys();
     }
+    if (auto *native_session = dynamic_cast<nvenc_encode_session_t *>(session.get());
+        native_session && native_session->has_output_identity_failure()) {
+      // Signal stream termination before driver teardown can block this thread.
+      shutdown_event->raise(true);
+      force_sync_teardown = true;
+      return encode_run_result_e::native_nvenc_identity_failed;
+    }
     if (native_amf_runtime_failed) {
       force_sync_teardown = true;
     }
@@ -5949,6 +5983,7 @@ namespace video {
         return encode_e::ok;
       }
       // Refresh display names since a display removal might have caused the reinitialization
+      if (synced_session_ctxs.front()->config.capture_target_valid && !synced_session_ctxs.front()->config.capture_target_valid()) return encode_e::error;
       const auto exact_output = synced_session_ctxs.front()->config.capture_source == capture_source_e::exact_output;
       const auto required_output = exact_output ? synced_session_ctxs.front()->config.capture_output : std::nullopt;
       refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, required_output, exact_output, policy::should_log_display_retry(display_retry_failures));
@@ -6182,6 +6217,19 @@ namespace video {
       };
 
       auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &display_cursor);
+      if (status == platf::capture_e::reinit && ec == platf::capture_e::ok) {
+        // Synchronous encoders share this thread, so destroying their sessions
+        // is the equivalent of the async worker's display-reference barrier.
+        synced_sessions.clear();
+        if (disp->commit_pending_capture_metadata()) {
+          for (auto &ctx : synced_session_ctxs) {
+            auto session = make_synced_session(disp, encoder, *img, *ctx);
+            if (!session) return encode_e::error;
+            synced_sessions.emplace_back(std::move(*session));
+          }
+          continue;
+        }
+      }
       switch (status) {
         case platf::capture_e::reinit:
         case platf::capture_e::error:
@@ -6649,6 +6697,12 @@ namespace video {
         last_hdr_info,
         rtx_hdr_metadata_refresh
       );
+      if (encode_result == encode_run_result_e::native_nvenc_identity_failed) {
+        // No replacement encoder may resume this client decoder after identity
+        // was lost. The capture scope's guard stops images and signals shutdown.
+        BOOST_LOG(error) << "NvEnc: ending stream after output picture identity failure"sv;
+        return;
+      }
 #ifdef _WIN32
       if (encode_result == encode_run_result_e::native_amf_failed && &session_encoder == &amdvce_experimental) {
         // Runtime fatals (TDR, sustained backpressure, output stalls) are

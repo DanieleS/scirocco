@@ -4,6 +4,7 @@
  */
 
 #include "playnite_sync.h"
+#include "src/remote_monitor_profile_policy.h"
 
 #include "src/config_playnite.h"
 #include "src/logging.h"
@@ -15,6 +16,7 @@
 namespace platf::playnite::sync {
   namespace {
     bool ensure_runtime_app_uuid(nlohmann::json &app) {
+      if (remote_session::marked_monitor_profile(app)) return false;
       try {
         if (app.contains("playnite-id") && app["playnite-id"].is_string() && !app["playnite-id"].get<std::string>().empty()) {
           return false;
@@ -156,7 +158,11 @@ namespace platf::playnite::sync {
   }
 
   void write_and_refresh_apps(nlohmann::json &root, const std::string &apps_path) {
-    file_handler::write_file(apps_path.c_str(), root.dump(4));
+    const auto previous_file = file_handler::read_file(apps_path.c_str());
+    const auto previous = nlohmann::json::parse(previous_file);
+    if (const auto error = proc::monitor_profile_changes_error(previous, root, previous_file); !error.empty()) {
+      throw std::invalid_argument(std::string {error});
+    }
     confighttp::refresh_client_apps_cache(root, false);
   }
 

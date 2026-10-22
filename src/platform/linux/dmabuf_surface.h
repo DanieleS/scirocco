@@ -5,7 +5,11 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
+#include <sstream>
+#include <string>
 #include <unistd.h>
 
 namespace egl {
@@ -19,6 +23,36 @@ namespace egl {
     std::uint32_t offsets[4] {};
     bool direct_import_required {};
   };
+
+  inline std::string describe_surface_layout(const surface_descriptor_t &surface) {
+    std::ostringstream description;
+    description << "width=" << surface.width
+                << " height=" << surface.height
+                << " fourcc=0x" << std::hex << surface.fourcc
+                << " modifier=0x" << surface.modifier
+                << std::dec;
+
+    std::size_t fd_slot_count = 0;
+    for (const int fd : surface.fds) {
+      fd_slot_count += static_cast<std::size_t>(fd >= 0);
+    }
+
+    description << " fd_slot_count=" << fd_slot_count << " fd_slots=[";
+    bool first_fd_slot = true;
+    for (std::size_t slot = 0; slot < std::size(surface.fds); ++slot) {
+      if (surface.fds[slot] < 0) {
+        continue;
+      }
+      if (!first_fd_slot) {
+        description << ',';
+      }
+      first_fd_slot = false;
+      description << slot << "{pitch=" << surface.pitches[slot]
+                  << ",offset=" << surface.offsets[slot] << '}';
+    }
+    description << ']';
+    return description.str();
+  }
 
   inline bool can_cpu_upload_surface(const surface_descriptor_t &surface) noexcept {
     constexpr std::uint64_t implicit_modifier = 0x00ffffffffffffffULL;

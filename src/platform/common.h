@@ -154,6 +154,8 @@ namespace platf {
 
     gamepad_feedback_e type;
     std::uint16_t id;
+    // Internal provenance for bounded host-side ViGEm send-result diagnostics.
+    bool from_vigem {false};
 
     union {
       struct {
@@ -618,6 +620,17 @@ namespace platf {
     }
 
     virtual void prepare_for_reinit() {
+    }
+
+    /**
+     * @brief Commit a source metadata change after all old encoders are gone.
+     * @details Called only after capture has returned reinit and all old
+     * encoder sessions/references have been released. A backend may then advance
+     * its metadata generation and retain its capture resources. False requests
+     * the usual complete display recreation. Never use this for a mode change.
+     */
+    virtual bool commit_pending_capture_metadata() {
+      return false;
     }
 
     /**

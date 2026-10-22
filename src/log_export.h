@@ -11,13 +11,17 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
+#include <istream>
 #include <limits>
 #include <optional>
 #include <regex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <zlib.h>
 
@@ -238,6 +242,172 @@ namespace log_export {
     return ZipDataEntry {std::move(name), sanitizer.sanitize(data), write_time};
   }
 
+  inline constexpr std::size_t support_log_read_limit = 64ull * 1024ull * 1024ull;
+
+  struct log_tail_t {
+    std::string data;
+    std::uintmax_t snapshot_bytes = 0;
+    std::size_t bytes_read = 0;
+    bool truncated = false;
+    bool changed = false;
+  };
+
+  // Seek once to snapshot the end of the opened file. Never chase appended
+  // bytes or use an unbounded rdbuf read, even if the file grows after seeking.
+  // The stream seam is also used by tests with real files that grow on read.
+  inline std::optional<log_tail_t> read_log_tail(std::istream &input, std::size_t limit) {
+    input.seekg(0, std::ios::end);
+    const auto end = input.tellg();
+    if (end < std::streampos {0}) {
+      return std::nullopt;
+    }
+    log_tail_t result;
+    result.snapshot_bytes = static_cast<std::uintmax_t>(end);
+    const auto count = static_cast<std::size_t>(std::min<std::uintmax_t>(result.snapshot_bytes, limit));
+    const auto start = end - static_cast<std::streamoff>(count);
+    input.seekg(start);
+    if (!input) {
+      return std::nullopt;
+    }
+    result.data.resize(count);
+    while (result.bytes_read < count) {
+      const auto chunk = std::min<std::size_t>(count - result.bytes_read, 64 * 1024);
+      input.read(result.data.data() + result.bytes_read, static_cast<std::streamsize>(chunk));
+      const auto received = static_cast<std::size_t>(input.gcount());
+      result.bytes_read += received;
+      if (received != chunk) {
+        break;
+      }
+    }
+    result.data.resize(result.bytes_read);
+    input.clear();
+    input.seekg(0, std::ios::end);
+    result.changed = input.tellg() != end || result.bytes_read != count;
+    result.truncated = result.bytes_read < result.snapshot_bytes;
+    if (start > std::streampos {0}) {
+      // The cut can split a username/address/path. Discard that partial line
+      // before sanitizing, rather than exporting a fragment without its context.
+      const auto newline = result.data.find('\n');
+      result.data.erase(0, newline == std::string::npos ? result.data.size() : newline + 1);
+    }
+    if ((result.truncated || result.changed) && !result.data.empty() && result.data.back() != '\n') {
+      const auto newline = result.data.rfind('\n');
+      result.data.resize(newline == std::string::npos ? 0 : newline + 1);
+    }
+    return result;
+  }
+
+  // One instance per export, shared by session, helper, fallback and installer
+  // sources. The budget counts bytes actually read, including discarded partial
+  // lines, before regex sanitization and ZIP construction allocate more memory.
+  class support_log_collection_t {
+  public:
+    explicit support_log_collection_t(std::size_t limit = support_log_read_limit):
+        remaining_ {limit} {
+    }
+
+    bool add_file(const std::filesystem::path &path, const std::string &name) {
+      std::error_code ec;
+      if (!std::filesystem::is_regular_file(path, ec)) {
+        return false;
+      }
+      const auto mtime = std::filesystem::last_write_time(path, ec);
+      const auto write_time = ec ? std::nullopt : std::optional {mtime};
+      std::ifstream input(path, std::ios::binary);
+      if (!input) {
+        return false;
+      }
+      // Callers interpret true as this requested path being available, even
+      // when its ZIP name was collected earlier. Skip only the body read.
+      if (names_.contains(name)) {
+        return true;
+      }
+      auto tail = read_log_tail(input, remaining_);
+      if (!tail) {
+        return false;
+      }
+      remaining_ -= tail->bytes_read;
+      bytes_read_ += tail->bytes_read;
+      std::string notice;
+      if (tail->truncated) {
+        notice = "[Log export truncated: read " + std::to_string(tail->bytes_read) + " of " + std::to_string(tail->snapshot_bytes) +
+                 " snapshot bytes; only complete recent lines are retained.]\n";
+        if (remaining_ == 0) {
+          notice += "[The shared log export read limit was reached; later files may contain omission notices only.]\n";
+        }
+      }
+      if (tail->changed) {
+        notice += "[Log export: file changed while reading; this export may omit later writes.]\n";
+      }
+      entries_.push_back(make_export_log_entry(sanitizer_, name, notice + tail->data, write_time));
+      names_.insert(name);
+      return true;
+    }
+
+    std::size_t bytes_read() const {
+      return bytes_read_;
+    }
+
+    const std::vector<ZipDataEntry> &entries() const {
+      return entries_;
+    }
+
+    std::vector<ZipDataEntry> take_entries() && {
+      return std::move(entries_);
+    }
+
+  private:
+    std::size_t remaining_;
+    std::size_t bytes_read_ = 0;
+    export_log_sanitizer_t sanitizer_;
+    std::unordered_set<std::string> names_;
+    std::vector<ZipDataEntry> entries_;
+  };
+
+  // Windows resolves these roots through Known Folder APIs first and uses
+  // CSIDL only when none of the Known Folder paths yielded an available log.
+  // Keep this caller policy here so tests can inject the Playnite base visits.
+  template<typename Collection>
+  static bool add_playnite_logs_from_base(Collection &collection, const std::filesystem::path &base) {
+    static constexpr std::array<const wchar_t *, 3> filenames {L"playnite.log", L"extensions.log", L"launcher.log"};
+    bool any = false;
+    for (const auto *filename : filenames) {
+      const auto path = base / filename;
+      if (collection.add_file(path, path.filename().string())) {
+        any = true;
+      }
+    }
+    return any;
+  }
+
+  template<typename VisitKnownFolderRoots, typename VisitCsidlRoots, typename Collection>
+  static bool add_playnite_logs_from_known_or_csidl(VisitKnownFolderRoots &&visit_known_folder_roots, VisitCsidlRoots &&visit_csidl_roots, Collection &collection) {
+    bool found_playnite_logs = false;
+    const auto add_known_base = [&](const std::filesystem::path &playnite_base) {
+      if (add_playnite_logs_from_base(collection, playnite_base)) {
+        found_playnite_logs = true;
+      }
+    };
+    try {
+      visit_known_folder_roots(add_known_base);
+    } catch (...) {}
+    if (found_playnite_logs) {
+      return found_playnite_logs;
+    }
+
+    const auto add_csidl_base = [&](const std::filesystem::path &playnite_base) {
+      try {
+        if (add_playnite_logs_from_base(collection, playnite_base)) {
+          found_playnite_logs = true;
+        }
+      } catch (...) {}
+    };
+    try {
+      visit_csidl_roots(add_csidl_base);
+    } catch (...) {}
+    return found_playnite_logs;
+  }
+
   [[maybe_unused]] static std::string build_zip_from_entries(const std::vector<ZipDataEntry> &entries) {
     std::string out;
 
@@ -346,6 +516,27 @@ namespace log_export {
       year = 2107;
     }
     dos_date = static_cast<uint16_t>(((year - 1980) << 9) | (((tm.tm_mon + 1) & 0x0F) << 5) | (tm.tm_mday & 0x1F));
+  }
+
+  static std::string make_support_log_archive_filename(const std::tm &tm) {
+    char filename[64];
+    std::snprintf(filename, sizeof(filename), "vibeshine_logs-%04d%02d%02d-%02d%02d%02d.zip", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    return filename;
+  }
+
+  // Build the archive before asking the caller for its filename. The Windows
+  // endpoint samples its timestamp after ZIP construction, as it did before
+  // this response path was extracted.
+  template<typename HeaderMap, typename Response, typename StatusCode, typename BuildArchive, typename BuildFilename>
+  static void write_archive_response(Response &&response, StatusCode status, const std::vector<ZipDataEntry> &entries, BuildArchive &&build_archive, BuildFilename &&build_filename) {
+    const auto zip = build_archive(entries);
+    const auto filename = build_filename();
+    HeaderMap headers;
+    headers.emplace("Content-Type", "application/zip");
+    headers.emplace("Content-Disposition", std::string("attachment; filename=\"") + filename + "\"");
+    headers.emplace("X-Frame-Options", "DENY");
+    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    response->write(status, zip, headers);
   }
 
 }  // namespace log_export

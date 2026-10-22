@@ -48,10 +48,15 @@
 #include "audio.h"
 #include "config.h"
 #include "config_playnite.h"
+#include "host_stream_control.h"
+#ifdef _WIN32
+  #include "platform/windows/hotkey_manager.h"
+#endif
 #include "display_device.h"
 #include "display_helper_integration.h"
 #include "file_handler.h"
 #include "globals.h"
+#include "hardware_metrics.h"
 #include "hdr_request_policy.h"
 #include "httpcommon.h"
 #include "http_pairing_policy.h"
@@ -62,6 +67,8 @@
 #include "nvhttp.h"
 #include "gameactivity.h"
 #include "play_stats.h"
+#include "power_action.h"
+#include "power_action_http.h"
 #include "nvhttp_bitrate_policy.h"
 #include "nvhttp_dispatch.h"
 #include "remote_session.h"
@@ -81,6 +88,7 @@
 #ifdef _WIN32
   #include "platform/windows/display.h"
   #include "platform/windows/playnite_integration.h"
+  #include "platform/windows/display_target_borrow.h"
   #include "platform/windows/display_helper_request_policy.h"
   #include "platform/windows/display_helper_request_helpers.h"
   #include "platform/windows/misc.h"
@@ -115,6 +123,7 @@ namespace nvhttp {
       remote_session::role_e role {remote_session::role_e::none};
       std::uint64_t generation {};
       std::string client_uuid;
+      std::optional<remote_session::monitor_profile_t> monitor_profile;
     };
 
     std::mutex remote_role_owners_mutex;
@@ -166,9 +175,16 @@ namespace nvhttp {
       return result;
     }
 
-    void remember_remote_owner(std::string_view uuid, remote_session::role_e role, std::uint64_t generation) {
+    std::optional<remote_session::monitor_profile_t> retained_monitor_profile(std::string_view uuid) {
       std::lock_guard lock {remote_role_owners_mutex};
-      remote_role_owners.insert_or_assign(remote_role_owner_key(uuid, role), remote_role_owner_t {role, generation, std::string {uuid}});
+      const auto it = remote_role_owners.find(remote_role_owner_key(uuid, remote_session::role_e::monitor));
+      return it == remote_role_owners.end() ? std::nullopt : it->second.monitor_profile;
+    }
+
+    void remember_remote_owner(std::string_view uuid, remote_session::role_e role, std::uint64_t generation,
+      std::optional<remote_session::monitor_profile_t> monitor_profile = std::nullopt) {
+      std::lock_guard lock {remote_role_owners_mutex};
+      remote_role_owners.insert_or_assign(remote_role_owner_key(uuid, role), remote_role_owner_t {role, generation, std::string {uuid}, std::move(monitor_profile)});
     }
 
     std::optional<std::uint64_t> remote_owner_generation(std::string_view uuid, remote_session::role_e role) {
@@ -215,6 +231,8 @@ namespace nvhttp {
   static constexpr std::string_view EMPTY_PROPERTY_TREE_ERROR_MSG = "Property tree is empty. Probably, control flow got interrupted by an unexpected C++ exception. This is a bug in Sunshine. Moonlight-qt will report Malformed XML (missing root element)."sv;
 
   void notify_remote_input_transport_lost(const std::string_view client_uuid, const std::uint64_t generation) {
+    host_stream_control::activity_guard_t activity;
+    if (!activity) return;
     forget_remote_owner(client_uuid, remote_session::role_e::input, generation);
     if (!has_stream_session_activity() && remote_display_topology::instance().managed_client_identity_count() == 0) {
       config::clear_runtime_config_overrides();
@@ -403,6 +421,8 @@ namespace nvhttp {
     }
 
     void register_remote_monitor_runtime() {
+      // Exact helper/native quiescence is retained through pending/capture teardown.
+      platf::windows_borrow::register_exact_target_probe(http::shared_virtual_display_guid_snapshot);
       remote_display_topology::instance().set_runtime_callbacks({
         .create_or_reclaim = [](const std::string &client_uuid, const std::string &client_label, const remote_display_topology::mode_t &mode) {
           if (!VDISPLAY::ensure_driver_is_ready()) return false;
@@ -694,6 +714,7 @@ namespace nvhttp {
     }
 
     void register_remote_monitor_runtime() {
+      remote_session::register_exact_target_probe(platf::linux_private_display::observe_exact_target);
       remote_display_topology::instance().set_runtime_callbacks({
         .create_or_reclaim = [](const std::string &client_uuid, const std::string &, const remote_display_topology::mode_t &mode) {
           return platf::linux_private_display::remote_create_or_reclaim(client_uuid, mode);
@@ -952,6 +973,8 @@ namespace nvhttp {
     }
 
     void cleanup_virtual_display_if_idle_locked() {
+      host_stream_control::activity_guard_t activity;
+      if (!activity) return;
       try {
         remote_display_topology::instance().release_drained_normal_game_identities();
         reconcile_remote_monitor_owners();
@@ -960,18 +983,19 @@ namespace nvhttp {
           return;
         }
 
-        if (!remote_display_topology::instance().generic_virtual_display_cleanup_allowed()) {
-          BOOST_LOG(info) << "Deferring virtual display cleanup until the remaining managed client display sessions release ownership.";
-          return;
-        }
-
-        // The shared finalizer stays armed while managed display owners exist.
+        // The shared finalizer also retries configured physical restoration
+        // for a paused normal owner without granting generic display cleanup.
         // Re-run it after each owner release so the final release consumes a
         // queued app REVERT exactly once. If no shared finalization is armed,
         // fall back to the bounded cancel cleanup path.
         if (stream::session::finalize_shared_runtime_if_idle("managed_display_owner_release")) {
           return;
         }
+        if (!remote_display_topology::instance().generic_virtual_display_cleanup_allowed()) {
+          BOOST_LOG(info) << "Deferring virtual display cleanup until the remaining managed client display sessions release ownership.";
+          return;
+        }
+
         cleanup_virtual_display_state(proc::consume_deferred_display_revert());
       } catch (const std::exception &e) {
         BOOST_LOG(warning) << "Virtual display cleanup failed: " << e.what();
@@ -981,6 +1005,8 @@ namespace nvhttp {
     }
 
     void cleanup_virtual_display_if_idle() {
+      host_stream_control::activity_guard_t activity;
+      if (!activity) return;
       // Serialize the final owner check through cleanup and exclude a
       // concurrent RTSP or WebRTC start. Callers already holding the lifecycle
       // gate must use cleanup_virtual_display_if_idle_locked().
@@ -1051,6 +1077,7 @@ namespace nvhttp {
     ) {
       VDISPLAY::VirtualDisplayRecoveryParams recovery_params;
       recovery_params.guid = virtual_display_guid;
+      recovery_params.requested_resolution_only = launch_session.requested_resolution_only;
       recovery_params.width = launch_session.resolution_override ?
                                 static_cast<uint32_t>(launch_session.resolution_override->width) :
                                 (launch_session.width > 0 ? static_cast<uint32_t>(launch_session.width) : 1920u);
@@ -1292,6 +1319,22 @@ namespace nvhttp {
       });
     }
 
+    std::function<void()> make_stream_start_restore_disarm(
+      std::function<bool()> cancelled,
+      const std::chrono::steady_clock::time_point deadline
+    ) {
+      // Preflight, VDD admission and pre-APPLY share one attempt. A failed
+      // preflight must neither fall through to legacy helper termination nor
+      // gain a fresh reconnect budget at the next display boundary.
+      return [cancelled = std::move(cancelled), deadline, attempted = false]() mutable {
+        if (attempted) {
+          return;
+        }
+        attempted = true;
+        (void) display_helper_integration::disarm_pending_restore(cancelled, deadline, true);
+      };
+    }
+
     void prepare_virtual_display_for_session(
       const std::shared_ptr<rtsp_stream::launch_session_t> &launch_session,
       audio::display_change_hold_t &request_audio_hold,
@@ -1301,8 +1344,10 @@ namespace nvhttp {
       std::optional<std::string> &pending_output_override,
       std::optional<video::encoder_probe_adapter_hint_lease_t> &pending_adapter_hint,
       VDISPLAY::policy::retained_resume_recovery_rearm_t *retained_resume_recovery_rearm,
+      const std::function<void()> &disarm_startup_restore,
       const std::function<bool()> &display_startup_cancelled,
-      const std::chrono::steady_clock::time_point display_startup_deadline
+      const std::chrono::steady_clock::time_point display_startup_deadline,
+      const bool preserve_owned_peers = false
     ) {
       request_audio_hold.capture_if_empty_and_attach(launch_session->audio_context_guard);
 
@@ -1359,10 +1404,11 @@ namespace nvhttp {
       const bool shared_virtual_display_mode =
         requested_virtual_display_mode == config::video_t::virtual_display_mode_e::shared;
       auto shared_virtual_display_uuid = VDISPLAY::persistentVirtualDisplayUuid();
-      if (shared_virtual_display_mode && !http::shared_virtual_display_guid.empty()) {
+      const auto shared_guid_snapshot=http::shared_virtual_display_guid_snapshot();
+      if (shared_virtual_display_mode && !shared_guid_snapshot.empty()) {
         try {
           shared_virtual_display_uuid =
-            uuid_util::uuid_t::parse(http::shared_virtual_display_guid);
+            uuid_util::uuid_t::parse(shared_guid_snapshot);
         } catch (...) {
           // Creation uses the same persistent fallback and repairs the stored value.
         }
@@ -1396,6 +1442,49 @@ namespace nvhttp {
       auto apply_framegen_refresh_policy = [&](bool uses_virtual_display) {
         apply_rtsp_framegen_refresh_policy(*launch_session, uses_virtual_display);
       };
+      launch_session->virtual_display_catalog_error.clear();
+      if (no_active_sessions && VDISPLAY::hasOwnedSunshineVirtualDisplays() &&
+          (!request_virtual_display || shared_virtual_display_mode) && !VDISPLAY::allowsSharedCatalogCapture()) {
+        launch_session->virtual_display_catalog_error = "The retained private catalog requires its owner's private bundled display; the existing target was preserved.";
+        return;
+      }
+      if (!no_active_sessions && !VDISPLAY::allowsSharedCatalogCapture()) {
+        launch_session->virtual_display_catalog_error = "Unable to verify that the current capture display has an unrestricted catalog; this client cannot share it.";
+        return;
+      }
+      if (launch_session->requested_resolution_only) {
+        if (!request_virtual_display || shared_virtual_display_mode || launch_session->client_uuid.empty() ||
+            !config::video.dd.use_sunshine_virtual_display_driver || !no_active_sessions ||
+            launch_session->role != remote_session::role_e::game || is_input_only) {
+          launch_session->virtual_display_catalog_error =
+            "Requested-resolution catalog requires this client's private bundled-driver display at a session boundary; shared, physical and peer sessions cannot use it.";
+          return;
+        }
+        if (!VDISPLAY::supportsRequestedResolutionCatalog()) {
+          launch_session->virtual_display_catalog_error =
+            "Requested-resolution catalog is unavailable: the opened bundled virtual display producer must support control protocol 3.8 or later.";
+          return;
+        }
+      }
+      // The producer owns an immutable catalog. On retained resume, compare it
+      // before the cached-device shortcut. Opt-out also replaces a restricted
+      // monitor. Query failures must stop opt-out reuse too; verified 3.7
+      // full-catalog sessions keep the old path through the inspection helper.
+      if (request_virtual_display && no_active_sessions) {
+        const auto desired = make_rtsp_virtual_display_recovery_params(
+          *launch_session, virtual_display_stable_guid, virtual_display_stable_id, launch_session->client_name);
+        const auto matches = VDISPLAY::virtualDisplayCatalogMatches(
+          virtual_display_stable_guid, desired.width, desired.height, launch_session->requested_resolution_only);
+        if (!matches) {
+          launch_session->virtual_display_catalog_error = "Unable to verify the retained virtual display catalog; the existing target was preserved.";
+          return;
+        }
+        if (!config::video.dd.use_sunshine_virtual_display_driver && VDISPLAY::hasOwnedSunshineVirtualDisplays()) {
+          launch_session->virtual_display_catalog_error = "The retained Sunshine display still belongs to the bundled provider; select that provider before resuming. The target was preserved.";
+          return;
+        }
+        if (!*matches || launch_session->requested_resolution_only) allow_display_changes = true;
+      }
       auto reserve_normal_vdd_identity = [&]() {
         if (shared_virtual_display_mode || launch_session->role != remote_session::role_e::game) return true;
         if (launch_session->normal_vdd_identity_token != 0) return true;
@@ -1663,13 +1752,14 @@ namespace nvhttp {
           };
 
           auto ensure_shared_guid = [&]() -> uuid_util::uuid_t {
-            if (!http::shared_virtual_display_guid.empty()) {
-              if (auto parsed = parse_uuid(http::shared_virtual_display_guid)) {
+            const auto persisted=http::shared_virtual_display_guid_snapshot();
+            if (!persisted.empty()) {
+              if (auto parsed = parse_uuid(persisted)) {
                 return *parsed;
               }
             }
             auto generated = VDISPLAY::persistentVirtualDisplayUuid();
-            http::shared_virtual_display_guid = generated.string();
+            http::set_shared_virtual_display_guid(generated.string());
             nvhttp::save_state();
             return generated;
           };
@@ -1773,7 +1863,8 @@ namespace nvhttp {
             recovery_params.hdr_requested,
             false,
             !shared_mode,
-            !remote_display_topology::instance().protected_remote_monitor_client_ids().empty()
+            preserve_owned_peers || !remote_display_topology::instance().protected_remote_monitor_client_ids().empty(),
+            launch_session->requested_resolution_only
           );
           if (display_info) {
             launch_session->virtual_display = true;
@@ -1834,6 +1925,9 @@ namespace nvhttp {
             launch_session->framegen_refresh_millihz.reset();
             launch_session->framegen_refresh_multiplier = 1;
             launch_session->framegen_fixed_refresh = false;
+            if (launch_session->requested_resolution_only) {
+              launch_session->virtual_display_catalog_error = "Requested-resolution virtual display creation or producer-state verification failed; no full-catalog fallback was accepted.";
+            }
             BOOST_LOG(warning) << "Virtual display creation failed.";
           }
         };
@@ -1863,7 +1957,7 @@ namespace nvhttp {
             }
           }
         }
-        if (allow_display_changes) {
+        if (allow_display_changes || launch_session->virtual_display_recreated_on_demand) {
           apply_framegen_refresh_policy(request_virtual_display);
 
           if (request_virtual_display) {
@@ -1873,17 +1967,16 @@ namespace nvhttp {
             // intended to prevent.
             const bool virtual_display_mutation_allowed =
               display_helper_integration::request_policy::supersede_restore_for_virtual_display(
+                disarm_startup_restore,
                 [&] {
-                  (void) display_helper_integration::disarm_pending_restore(
+                  const bool restoring = display_helper_integration::restore_in_progress(
                     display_startup_cancelled,
                     display_startup_deadline
                   );
-                },
-                [&] {
-                  return display_helper_integration::restore_in_progress(
-                    display_startup_cancelled,
-                    display_startup_deadline
-                  );
+                  // Recheck after the liveness probe before admitting mutation.
+                  return display_startup_cancelled() ||
+                         std::chrono::steady_clock::now() >= display_startup_deadline ||
+                         restoring;
                 }
               );
             if (!virtual_display_mutation_allowed) {
@@ -1915,6 +2008,8 @@ namespace nvhttp {
 #ifdef __linux__
   namespace {
     void cleanup_virtual_display_if_idle_locked() {
+      host_stream_control::activity_guard_t activity;
+      if (!activity) return;
       try {
         remote_display_topology::instance().release_drained_normal_game_identities();
         reconcile_remote_monitor_owners();
@@ -1938,6 +2033,8 @@ namespace nvhttp {
     }
 
     void cleanup_virtual_display_if_idle() {
+      host_stream_control::activity_guard_t activity;
+      if (!activity) return;
       std::unique_lock<std::mutex> lifecycle_lock(stream_lifecycle_mutex());
       cleanup_virtual_display_if_idle_locked();
     }
@@ -2203,7 +2300,9 @@ namespace nvhttp {
           named_cert_node["perm"] = static_cast<uint32_t>(named_cert_p->perm);
           named_cert_node["enable_legacy_ordering"] = named_cert_p->enable_legacy_ordering;
           named_cert_node["allow_client_commands"] = named_cert_p->allow_client_commands;
+          named_cert_node["allow_sleep"] = named_cert_p->allow_sleep;
           named_cert_node["always_use_virtual_display"] = named_cert_p->always_use_virtual_display;
+          named_cert_node["requested_resolution_only"] = named_cert_p->requested_resolution_only;
           if (named_cert_p->prefer_10bit_sdr) {
             named_cert_node["prefer_10bit_sdr"] = true;
           }
@@ -2262,8 +2361,9 @@ namespace nvhttp {
         update::notification::write_root(vibe_root, notifications);
 
 #ifdef _WIN32
-        if (!http::shared_virtual_display_guid.empty()) {
-          vibe_root.put("shared_virtual_display_guid", http::shared_virtual_display_guid);
+        const auto persisted_shared_guid=http::shared_virtual_display_guid_snapshot();
+        if (!persisted_shared_guid.empty()) {
+          vibe_root.put("shared_virtual_display_guid", persisted_shared_guid);
         }
 #endif
 
@@ -2348,7 +2448,9 @@ namespace nvhttp {
               }
               named_cert_p->enable_legacy_ordering = util::get_non_string_json_value<bool>(el, "enable_legacy_ordering", true);
               named_cert_p->allow_client_commands = util::get_non_string_json_value<bool>(el, "allow_client_commands", true);
+              named_cert_p->allow_sleep = el.contains("allow_sleep") && el["allow_sleep"].is_boolean() && el["allow_sleep"].get<bool>();
               named_cert_p->always_use_virtual_display = util::get_non_string_json_value<bool>(el, "always_use_virtual_display", false);
+              named_cert_p->requested_resolution_only = util::get_non_string_json_value<bool>(el, "requested_resolution_only", false);
               named_cert_p->prefer_10bit_sdr =
                 el.contains("prefer_10bit_sdr") && !el["prefer_10bit_sdr"].is_null() &&
                 util::get_non_string_json_value<bool>(el, "prefer_10bit_sdr", false);
@@ -2436,7 +2538,7 @@ namespace nvhttp {
           }
           update::notification::apply(update::state, update::notification::read_file(vibeshine_tree));
 #ifdef _WIN32
-          http::shared_virtual_display_guid = vibeshine_tree.get("root.shared_virtual_display_guid", "");
+          http::set_shared_virtual_display_guid(vibeshine_tree.get("root.shared_virtual_display_guid", ""));
 #endif
 
         } catch (const std::exception &e) {
@@ -2444,19 +2546,19 @@ namespace nvhttp {
           update::notification::apply(update::state, {});
 
 #ifdef _WIN32
-          http::shared_virtual_display_guid.clear();
+          http::set_shared_virtual_display_guid({});
 #endif
         }
       } else {
         update::notification::apply(update::state, {});
 #ifdef _WIN32
-        http::shared_virtual_display_guid.clear();
+        http::set_shared_virtual_display_guid({});
 #endif
       }
 
 #ifdef _WIN32
       if (share_state_file && !root.contains("shared_virtual_display_guid")) {
-        http::shared_virtual_display_guid.clear();
+        http::set_shared_virtual_display_guid({});
       }
 #endif
 
@@ -2558,6 +2660,44 @@ namespace nvhttp {
     std::mutex &stream_lifecycle_mutex() {
       return stream_lifecycle_gate;
     }
+
+#ifdef _WIN32
+  void terminate_all_streams_from_host(const std::function<bool()> &authorized) {
+    const bool drained = host_stream_control::terminate(authorized, [&] {
+      std::lock_guard cancel_lock {launch_request_mutex};
+      if (!authorized()) return;
+      stream::session::cleanup_reservation_t cleanup_reservation;
+      BOOST_LOG(info) << "Host end-stream shortcut: ending all streams and restoring the physical desktop.";
+      // Existing natural reapers/closes/expiry notifications have drained.
+      // Joins acquire lifecycle themselves; admission is closed without holding
+      // lifecycle, so terminal-owned nested cleanup cannot deadlock on it.
+      rtsp_stream::terminate_sessions(false);
+      webrtc_stream::shutdown_all_sessions();
+      proc::proc.terminate();
+      remote_session::notify_monitor_shutdown();
+      {
+        // Old queued RTSP workers no longer own this epoch. Complete ordinary
+        // runtime cleanup/config restoration before the final physical restore.
+        std::unique_lock lifecycle_lock {stream_lifecycle_mutex()};
+        (void) stream::session::finalize_shared_runtime_if_idle("host_end_stream");
+        // A false finalizer result can mean either no armed work or retained
+        // ownership after topology failure. Only the former is safe to finish.
+        if (stream::session::has_shared_runtime_owner() ||
+            !remote_display_topology::instance().shutdown_complete()) {
+          BOOST_LOG(error) << "Host end-stream shortcut: runtime/display ownership remains; physical recovery deferred. Retry after the teardown or topology failure is resolved.";
+          return;
+        }
+      }
+      const auto cleanup = platf::virtual_display_cleanup::terminate_all("end_stream_hotkey");
+      if (!cleanup.virtual_displays_removed || !cleanup.physical_display_recovered) {
+        BOOST_LOG(warning) << "Host end-stream shortcut: display recovery did not confirm an active physical monitor.";
+      }
+    });
+    if (!drained) {
+      BOOST_LOG(warning) << "Host end-stream shortcut: authorization changed or in-process activity did not drain within 30 seconds; physical recovery was not attempted.";
+    }
+  }
+#endif
 
     std::unique_lock<std::mutex> acquire_stream_start_lifecycle_lock() {
       bool waited_for_teardown = false;
@@ -2717,6 +2857,15 @@ namespace nvhttp {
       );
       session.dd_config_option_override = preparation.option;
       session.virtual_display_preparation_override = preparation.virtual_override;
+    }
+
+    std::vector<remote_session::app_t> remote_configured_catalogue(const std::vector<proc::ctx_t> &configured_apps) {
+      std::vector<remote_session::app_t> result;
+      result.reserve(configured_apps.size());
+      for (const auto &configured : configured_apps) {
+        result.push_back({static_cast<std::int32_t>(util::from_view(configured.id)), configured.uuid, configured.name, false, configured.remote_monitor_profile, configured.id_aliases});
+      }
+      return result;
     }
 
     static std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session_from_snapshot(
@@ -2893,6 +3042,7 @@ namespace nvhttp {
 
       const auto requested_mode_text = get_arg(args, "mode", config::video.fallback_mode.c_str());
       if (const auto requested_mode = parse_display_mode(requested_mode_text)) {
+        launch_session->exact_requested_refresh_millihz = requested_mode->refresh_millihz;
         launch_session->width = requested_mode->width;
         launch_session->height = requested_mode->height;
         launch_session->fps = static_cast<int>(requested_mode->refresh_millihz);
@@ -2930,6 +3080,7 @@ namespace nvhttp {
         }
       }
       launch_session->client_requests_virtual_display = verified_client->always_use_virtual_display;
+      launch_session->requested_resolution_only = verified_client->requested_resolution_only;
       if (!verified_client->hdr_profile.empty()) {
         launch_session->hdr_profile = verified_client->hdr_profile;
       }
@@ -2937,7 +3088,11 @@ namespace nvhttp {
       launch_session->perm = verified_client->perm;
       const auto launch_appid_arg = get_arg(args, "appid", "0");
       const auto launch_appuuid_arg = get_arg(args, "appuuid", "");
-      auto launch_app_ctx = proc::proc.resolve_app(launch_appid_arg, launch_appuuid_arg);
+      const auto launch_identity_control = remote_session::identify(
+        util::from_view(launch_appid_arg), launch_appuuid_arg, proc::proc.current_app_id(), remote_configured_catalogue(proc::proc.get_apps())
+      );
+      auto launch_app_ctx = launch_identity_control == remote_session::control_e::none ?
+        proc::proc.resolve_app(launch_appid_arg, launch_appuuid_arg) : std::nullopt;
       launch_session->client_display_warning_requested = client_display_warning_requested(args, verified_client, launch_app_ctx);
       int app_scale_factor = 100;
       launch_session->appid = launch_app_ctx ? (int) util::from_view(launch_app_ctx->id) : (int) util::from_view(launch_appid_arg);
@@ -2964,7 +3119,7 @@ namespace nvhttp {
         launch_session->client_name = original_client_name;
       }
 
-      if (launch_app_ctx || launch_session->appid > 0) {
+      if (launch_app_ctx || (launch_identity_control == remote_session::control_e::none && launch_session->appid > 0)) {
         try {
           if (auto app_ctx = launch_app_ctx ? launch_app_ctx : proc::proc.resolve_app(launch_session->appid)) {
             launch_session->appid = (int) util::from_view(app_ctx->id);
@@ -3028,12 +3183,18 @@ namespace nvhttp {
       launch_session->client_vrr_requested = util::from_view(get_arg(args, "clientVrrRequested", "0"));
       auto color_app_ctx = launch_app_ctx;
       const auto current_color_app_id = proc::proc.current_app_id();
-      const auto color_control = remote_session::identify(launch_session->appid, launch_appuuid_arg, current_color_app_id);
+      const auto color_control = launch_identity_control;
       if (!color_app_ctx && ((launch_session->appid <= 0 && launch_appuuid_arg.empty()) ||
                              color_control == remote_session::control_e::resume ||
                              color_control == remote_session::control_e::running_game)) {
         color_app_ctx = proc::proc.resolve_app(current_color_app_id);
       }
+      // This transport owns its input settings even when another client owns
+      // the shared capture/runtime config. Resume requests inherit the running app.
+      launch_session->guide_button = config::guide_button_config_for_session(
+        color_app_ctx ? color_app_ctx->config_overrides : std::unordered_map<std::string, std::string> {},
+        verified_client->config_overrides
+      );
       launch_session->prefer_sdr_10bit = rtsp_stream::hdr_request_policy::resolve_prefer_10bit_sdr(
         verified_client->prefer_10bit_sdr,
         use_app_color_preference && color_app_ctx ? color_app_ctx->prefer_10bit_sdr : std::nullopt
@@ -3409,6 +3570,81 @@ namespace nvhttp {
       return !!(client_perm(verified_client) & perm);
     }
 
+    // Require current certificate-bound authority with View or Launch permission.
+    hardware_metrics::access_t hardware_metrics_access(req_https_t request) {
+      const auto settings = config::get_hardware_metrics_settings();
+      const auto verified_client = get_verified_cert(request);
+      return {settings.enabled, verified_client && !verified_client->uuid.empty() && has_client_perm(verified_client, PERM::_allow_view), settings.interval_ms};
+    }
+
+    bool hardware_metrics_has_running_video(req_https_t request) {
+      const auto verified_client = get_verified_cert(request);
+      return has_client_perm(verified_client, PERM::_allow_view) &&
+             rtsp_stream::has_running_video_for_client(verified_client->uuid);
+    }
+
+    void write_hardware_metrics(resp_https_t response, const hardware_metrics::response_t &result) {
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      headers.emplace("Cache-Control", "no-store");
+      response->write(static_cast<SimpleWeb::StatusCode>(result.status), result.body.dump(), headers);
+    }
+
+    void hardware_metrics_query(hardware_metrics::service_t &service, resp_https_t response, req_https_t request) {
+      auto result = hardware_metrics::query(service, [&] {
+        return hardware_metrics_access(request);
+      },
+                                            [&] {
+                                              return hardware_metrics_has_running_video(request);
+                                            });
+      write_hardware_metrics(std::move(response), result);
+    }
+
+  power_action::service_t paired_power_actions {stream_lifecycle_gate};
+
+  power_action::hooks_t power_action_hooks(resp_https_t response, req_https_t request) {
+    return {
+      .authority = [request] {
+        const auto identity = get_verified_cert(request);
+        return identity ? power_action::authority_t {identity->uuid, identity->allow_sleep} : power_action::authority_t {};
+      },
+      .supported = power_action::native_sleep_supported,
+      .activity = [] {
+        return power_action::activity_t {
+          .app = proc::proc.active_session_guard().has_active_app || proc::proc.running() > 0,
+          .pending = rtsp_stream::has_pending_launch_or_startup(),
+          .rtsp = rtsp_stream::session_count_no_cleanup() > 0,
+          .running = stream::session::running_sessions.load(std::memory_order_acquire) != 0,
+          .teardown = stream::session::teardown_sessions.load(std::memory_order_acquire) != 0 || webrtc_stream::has_teardown_in_progress(),
+          .webrtc = webrtc_stream::has_active_or_pending_sessions(),
+          .capture = webrtc_stream::has_capture_active(),
+          .remote_owner = has_remote_role_owner(),
+        };
+      },
+      .suspend_if_authorized = [request] {
+        std::lock_guard lock(client_mutex);
+        const auto identity = tls_client_identities.resolve_snapshot(request, client_root.named_devices);
+        if (!identity || !identity->allow_sleep) return false;
+        return power_action::native_sleep();
+      },
+      .respond = [response](const auto &value) { return power_action::write_response(response, value); },
+    };
+  }
+
+  void get_power_action_capabilities(resp_https_t response, req_https_t request) {
+    const auto hooks = power_action_hooks(response, request);
+    hooks.respond(paired_power_actions.capabilities(hooks));
+  }
+
+  void post_sleep(resp_https_t response, req_https_t request) {
+    const auto result = paired_power_actions.sleep(power_action::parse_request(*request), power_action_hooks(response, request));
+    if (result == power_action::result_e::response_failed) {
+      BOOST_LOG(warning) << "Sleep request was not executed because its acceptance response could not be flushed.";
+    } else if (result == power_action::result_e::native_failed) {
+      BOOST_LOG(warning) << "Sleep request was accepted but native sleep failed or client authorization was revoked before invocation.";
+    }
+  }
+
     // `quiet` keeps high-frequency background polls (e.g. ServerCommand) at debug level
     // so a client that legitimately lacks the permission doesn't flood the log.
     inline void log_permission_denied(std::string_view action, std::string_view perm_label, const verified_client_t &verified_client, bool quiet = false) {
@@ -3754,9 +3990,13 @@ namespace nvhttp {
       print_req<T>(request);
 
       int pair_status = 0;
+      bool metrics_supported = false;
+      bool sleep_allowed = false;
       if constexpr (std::is_same_v<SunshineHTTPS, T>) {
         const auto verified_client = get_verified_cert(request);
         pair_status = !resolve_client_identity(request, verified_client).uuid.empty();
+        metrics_supported = hardware_metrics::advertised(hardware_metrics_access(request));
+        sleep_allowed = verified_client && verified_client->allow_sleep;
       }
 
       auto local_endpoint = request->local_endpoint();
@@ -3770,6 +4010,14 @@ namespace nvhttp {
       tree.put("root.GfeVersion", GFE_VERSION);
       tree.put("root.uniqueid", http::unique_id);
       tree.put("root.HttpsPort", net::map_port(PORT_HTTPS));
+      tree.put("root.HardwareMetricsVersion", metrics_supported ? 1 : 0);
+      if constexpr (std::is_same_v<SunshineHTTPS, T>) {
+        if (pair_status) {
+          tree.put("root.PowerActionVersion", 1);
+          tree.put("root.SleepSupported", power_action::native_sleep_supported() ? 1 : 0);
+          tree.put("root.SleepAllowed", sleep_allowed ? 1 : 0);
+        }
+      }
       tree.put("root.ExternalPort", net::map_port(PORT_HTTP));
 
       // Optional Moonlight extension. These describe integration/configuration,
@@ -4003,6 +4251,9 @@ namespace nvhttp {
     nlohmann::json get_all_clients() {
       nlohmann::json named_cert_nodes = nlohmann::json::array();
       const client_t client = client_root_snapshot();
+#ifdef _WIN32
+      const bool catalog_supported = VDISPLAY::supportsRequestedResolutionCatalog();
+#endif
       std::list<std::string> connected_uuids = rtsp_stream::get_all_session_uuids();
 
       for (auto &named_cert : client.named_devices) {
@@ -4019,7 +4270,12 @@ namespace nvhttp {
         named_cert_node["perm"] = static_cast<uint32_t>(named_cert->perm);
         named_cert_node["enable_legacy_ordering"] = named_cert->enable_legacy_ordering;
         named_cert_node["allow_client_commands"] = named_cert->allow_client_commands;
+        named_cert_node["allow_sleep"] = named_cert->allow_sleep;
         named_cert_node["always_use_virtual_display"] = named_cert->always_use_virtual_display;
+        named_cert_node["requested_resolution_only"] = named_cert->requested_resolution_only;
+#ifdef _WIN32
+        named_cert_node["requested_resolution_catalog_supported"] = catalog_supported;
+#endif
         named_cert_node["prefer_10bit_sdr"] = named_cert->prefer_10bit_sdr;
         if (named_cert->last_seen.has_value()) {
           named_cert_node["last_seen"] = *named_cert->last_seen;
@@ -4188,16 +4444,13 @@ namespace nvhttp {
           visible_apps.push_back(&app);
         }
 
-        std::vector<remote_session::app_t> configured_apps;
-        configured_apps.reserve(visible_apps.size());
-        for (const auto *app : visible_apps) {
-          const auto appid = util::from_view(app->id);
-          // The source remote-session controls replace Vibepollo's legacy
-          // synthetic input/terminate entries; do not advertise both sets.
-          if (appid == proc::input_only_app_id || appid == proc::terminate_app_id) {
-            continue;
-          }
-          configured_apps.push_back({static_cast<std::int32_t>(appid), app->uuid, app->name, false});
+        auto configured_apps = remote_configured_catalogue(app_list);
+        for (std::size_t i = 0; i < configured_apps.size(); ++i) {
+          const auto appid = configured_apps[i].id;
+          // Preserve visibility policy while reserving hidden IDs and aliases.
+          configured_apps[i].catalogue_visible =
+            appid != proc::input_only_app_id && appid != proc::terminate_app_id &&
+            std::find(visible_apps.begin(), visible_apps.end(), &app_list[i]) != visible_apps.end();
         }
 
         const auto current_app = proc::proc.resolve_app(current_appid);
@@ -4347,7 +4600,13 @@ namespace nvhttp {
       // Synthetic controls are host actions, never configured applications.
       // Identify them before resolve_app() so they cannot collide with an
       // apps.json id and accidentally launch a real process.
-      const auto synthetic_control = remote_session::identify(util::from_view(appid_str), appuuid_str, current_appid);
+      auto synthetic_control = remote_session::identify(util::from_view(appid_str), appuuid_str, current_appid, remote_configured_catalogue(proc::proc.get_apps()));
+      // Configured profiles are host Monitor actions, never normal process
+      // launches. Resolve only an explicit marker on the selected UUID/ID.
+      const auto selected_app = synthetic_control == remote_session::control_e::none ?
+        proc::proc.resolve_app(appid_str, appuuid_str) : std::nullopt;
+      const bool selected_monitor_profile = selected_app && selected_app->remote_monitor_profile;
+      if (selected_monitor_profile) synthetic_control = remote_session::control_e::monitor;
       // A secondary client sees the active game in its projected catalogue
       // while serverinfo is deliberately presented as free. Selecting it is a
       // Resume request, not a second process launch.
@@ -4517,18 +4776,46 @@ namespace nvhttp {
         }
 
         const bool no_active_sessions = !has_stream_session_activity();
-        const auto runtime_app = proc::proc.resolve_app(
-          "0",
-          remote_session::synthetic(
-            synthetic_control == remote_session::control_e::input ? remote_session::control_e::input : remote_session::control_e::monitor
-          ).uuid
-        );
+        const auto retained_profile = retained_monitor_profile(request_client_identity.uuid);
+        const bool monitor_request = synthetic_control != remote_session::control_e::input;
+        const auto builtin_uuid = remote_session::synthetic(
+          monitor_request ? remote_session::control_e::monitor : remote_session::control_e::input
+        ).uuid;
+        // Generic Resume resolves the retained profile, including after its app
+        // entry has been deleted. A cached different tile cannot replace it.
+        const auto requested_profile_uuid = selected_monitor_profile ? selected_app->uuid :
+          ((synthetic_control == remote_session::control_e::resume ||
+            synthetic_control == remote_session::control_e::running_game) && retained_profile ? retained_profile->uuid : builtin_uuid);
+        const auto runtime_app = proc::proc.resolve_app("0", requested_profile_uuid);
+        std::optional<remote_session::monitor_profile_t> monitor_profile;
+        if (monitor_request) {
+          monitor_profile = remote_session::select_monitor_profile(
+            {requested_profile_uuid, runtime_app ? runtime_app->config_overrides : std::unordered_map<std::string, std::string> {}, runtime_app ? runtime_app->monitor_target : std::nullopt},
+            retained_profile
+          );
+          if (!monitor_profile) {
+            tree.put("root.resume", 0);
+            tree.put("root.<xmlattr>.status_code", 409);
+            tree.put("root.<xmlattr>.status_message", "Disconnect Monitor before selecting a different Remote Monitor profile");
+            return;
+          }
+        }
+#ifndef SUNSHINE_EXPERIMENTAL_TARGET_LEASES
+        if (monitor_profile && monitor_profile->target) {
+          tree.put("root.resume", 0);
+          tree.put("root.<xmlattr>.status_code", 409);
+          tree.put("root.<xmlattr>.status_message", "Exact target borrowing is disabled in this build.");
+          return;
+        }
+#endif
         auto client_settings = verified_client;
         if (!client_settings && !request_client_identity.uuid.empty()) {
           client_settings = get_client_snapshot_by_uuid(request_client_identity.uuid);
         }
         std::unordered_map<std::string, std::string> requested_runtime_overrides;
-        if (runtime_app) {
+        if (monitor_profile) {
+          config::merge_config_overrides(requested_runtime_overrides, monitor_profile->app_overrides);
+        } else if (runtime_app) {
           config::merge_config_overrides(requested_runtime_overrides, runtime_app->config_overrides);
         }
         if (client_settings) {
@@ -4598,16 +4885,22 @@ namespace nvhttp {
           request,
           false
         );
+        if (launch_session->requested_resolution_only) {
+          tree.put("root.<xmlattr>.status_code", 409);
+          tree.put("root.<xmlattr>.status_message", "Requested-resolution catalog is supported only for a private Windows game session.");
+          return;
+        }
         launch_session->role_generation = launch_session->id;
         launch_session->role = is_remote_input ?
                                  remote_session::role_e::input :
                                  remote_session::role_e::monitor;
+        if (monitor_profile) launch_session->monitor_profile_uuid = monitor_profile->uuid;
         launch_session->host_audio = remote_session::uses_host_audio(launch_session->role);
         launch_session->continuous_audio = false;
         if (launch_session->role == remote_session::role_e::monitor) {
 #ifdef __linux__
-          launch_session->display_power_guard = platf::display_power::acquire();
-          if (!launch_session->display_power_guard) {
+          if (!monitor_profile || !monitor_profile->target) launch_session->display_power_guard = platf::display_power::acquire();
+          if ((!monitor_profile || !monitor_profile->target) && !launch_session->display_power_guard) {
             tree.put("root.resume", 0);
             tree.put("root.<xmlattr>.status_code", 503);
             tree.put("root.<xmlattr>.status_message", "The desktop display could not be woken for streaming");
@@ -4623,7 +4916,11 @@ namespace nvhttp {
             launch_session->height,
             monitor_fps_hz
           );
-          const auto monitor = remote_session::activate_or_resume_monitor(
+          auto monitor = monitor_profile && monitor_profile->target ? remote_session::borrow_monitor_target(
+          request_client_identity.uuid, launch_session->role_generation, *monitor_profile->target,
+          {launch_session->width, launch_session->height, launch_session->client_display_refresh_millihz ?
+            launch_session->client_display_refresh_millihz : launch_session->exact_requested_refresh_millihz,
+            rtsp_stream::effective_hdr_requested(*launch_session)}, launch_session->output_name_override) : remote_session::activate_or_resume_monitor(
             request_client_identity.uuid,
             request_client_identity.name,
             mode,
@@ -4637,12 +4934,13 @@ namespace nvhttp {
             remember_remote_owner(
               request_client_identity.uuid,
               launch_session->role,
-              launch_session->role_generation
+              launch_session->role_generation,
+              monitor_profile
             );
           }
           if (!monitor.ready || monitor.output.empty()) {
             tree.put("root.resume", 0);
-            tree.put("root.<xmlattr>.status_code", monitor.retryable ? 503 : 500);
+            tree.put("root.<xmlattr>.status_code", monitor.conflict ? 409 : monitor.retryable ? 503 : 500);
             tree.put(
               "root.<xmlattr>.status_message",
               monitor.error.empty() ? "Remote Monitor exact capture target is not ready" : monitor.error
@@ -4654,6 +4952,8 @@ namespace nvhttp {
             launch_session->force_sdr = true;
           }
           launch_session->remote_capture_output = monitor.output;
+        launch_session->exact_monitor_target = monitor.exact_target;
+        launch_session->exact_target_hold = std::move(monitor.target_hold);
           BOOST_LOG(info) << "Remote Monitor exact capture target for client '"
                           << request_client_identity.uuid << "' is '" << monitor.output << "'.";
         }
@@ -4663,6 +4963,7 @@ namespace nvhttp {
             if (remote_session::release_monitor(request_client_identity.uuid, launch_session->role_generation, "Paired client authorization revoked")) {
               forget_remote_owner(request_client_identity.uuid, launch_session->role, launch_session->role_generation);
             }
+launch_session->exact_target_hold.reset();
 #if defined(_WIN32) || defined(__linux__)
             cleanup_virtual_display_if_idle_locked();
 #endif
@@ -4686,6 +4987,7 @@ namespace nvhttp {
                 launch_session->role_generation
               );
             }
+launch_session->exact_target_hold.reset();
 #if defined(_WIN32) || defined(__linux__)
             cleanup_virtual_display_if_idle();
 #endif
@@ -4914,20 +5216,27 @@ namespace nvhttp {
         std::chrono::steady_clock::now() +
         display_helper_integration::kStreamStartApplyVerificationTimeout;
       const auto display_startup_cancelled = [display_startup_deadline] {
-        return std::chrono::steady_clock::now() >= display_startup_deadline;
+        const auto shutdown_event = mail::man ? mail::man->event<bool>(mail::shutdown) : nullptr;
+        return (shutdown_event && shutdown_event->peek()) ||
+               std::chrono::steady_clock::now() >= display_startup_deadline;
       };
-      // First step on stream start: stop any in-flight helper restore loop immediately.
-      // This must happen before any other display helper work to prevent restore/crash loops on virtual displays.
-      request_audio_hold.before([&] {
-        (void) display_helper_integration::disarm_pending_restore(
-          display_startup_cancelled,
-          display_startup_deadline
-        );
-      });
+      const auto disarm_startup_restore = make_stream_start_restore_disarm(
+        display_startup_cancelled,
+        display_startup_deadline
+      );
+      // Recover stale restore IPC before any other session display work.
+      request_audio_hold.before(disarm_startup_restore);
 #endif
       const bool allow_display_changes = true;
       auto launch_session = make_launch_session_from_snapshot(host_audio, is_input_only, args, verified_client, &request_client_identity, request);
-      request_audio_hold.attach(launch_session->audio_context_guard);
+  #ifndef _WIN32
+    if (launch_session->requested_resolution_only) {
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Requested-resolution catalog requires the Windows bundled virtual display producer control 3.8 or later.");
+      return;
+    }
+#endif
+    request_audio_hold.attach(launch_session->audio_context_guard);
       std::optional<std::string> pending_output_override;
       auto output_override_guard = util::fail_guard([&]() {
         if (pending_output_override) {
@@ -4958,7 +5267,7 @@ namespace nvhttp {
           return;
         }
 
-        if (!launch_session->virtual_display) {
+        if (!launch_session->virtual_display_catalog_error.empty() || !launch_session->virtual_display) {
           return;
         }
 
@@ -4985,9 +5294,16 @@ namespace nvhttp {
         pending_output_override,
         pending_adapter_hint,
         nullptr,
+        disarm_startup_restore,
         display_startup_cancelled,
         display_startup_deadline
       );
+      if (!launch_session->virtual_display_catalog_error.empty()) {
+        tree.put("root.<xmlattr>.status_code", 503);
+        tree.put("root.<xmlattr>.status_message", launch_session->virtual_display_catalog_error);
+        tree.put("root.gamesession", 0);
+        return;
+      }
       if (launch_session->normal_vdd_capacity_rejected) {
         tree.put("root.<xmlattr>.status_code", 409);
         tree.put("root.<xmlattr>.status_message", "Virtual display client limit reached");
@@ -5045,10 +5361,7 @@ namespace nvhttp {
 
 
 #ifdef _WIN32
-        (void) display_helper_integration::disarm_pending_restore(
-          display_startup_cancelled,
-          display_startup_deadline
-        );
+        disarm_startup_restore();
         auto request = display_helper_integration::helpers::build_request_from_session(config::video, *launch_session);
         launch_session->display_config_preapply_attempted = true;
         if (!request) {
@@ -5386,12 +5699,25 @@ namespace nvhttp {
       active_game.client_uuid, request_client_identity.uuid
     );
     std::optional<std::string> retained_game_output;
+#ifdef _WIN32
+    std::optional<std::string> retained_game_device_id;
+#endif
     bool retained_game_output_ready = false;
     if (no_active_sessions) {
       if (const auto retained_output = config::runtime_output_name_override(); retained_output && !retained_output->empty()) {
         const auto capture_outputs = platf::display_names();
+        auto retained_capture_name = *retained_output;
+#ifdef _WIN32
+        // Normal virtual outputs retain a libdisplaydevice device UUID, while
+        // capture enumeration publishes GDI names. Resolve only that exact
+        // active device; retain the UUID separately for lease authorization.
+        if (const auto resolved_name = display_device::active_display_name_for_device_id(*retained_output)) {
+          retained_capture_name = *resolved_name;
+          retained_game_device_id = *retained_output;
+        }
+#endif
         retained_game_output_ready =
-          std::find(capture_outputs.begin(), capture_outputs.end(), *retained_output) != capture_outputs.end();
+          std::find(capture_outputs.begin(), capture_outputs.end(), retained_capture_name) != capture_outputs.end();
         if (retained_game_output_ready) {
           retained_game_output = *retained_output;
           BOOST_LOG(info) << "Resume will join the capture-ready retained game output '"
@@ -5399,11 +5725,30 @@ namespace nvhttp {
         }
       }
     }
+    bool exclusive_retained_catalog_owner = false;
+#ifdef _WIN32
+    // A capture-ready retained output is not a shared capture when the paired
+    // app owner still owns this exact normal Sunshine display and every live,
+    // pending, starting and tearing-down transport has released capture.
+    if (no_active_sessions && retained_game_output && retained_game_device_id && active_game.has_active_app &&
+        active_game.normal_vdd_identity_token != 0 &&
+        !active_game.client_uuid.empty() && active_game.client_uuid == request_client_identity.uuid) {
+      const auto retained_uuid = VDISPLAY::virtualDisplayUuidFromStableId(active_game.client_uuid);
+      VDISPLAY::TrackedDisplayCleanupTarget retained_target;
+      std::copy_n(retained_uuid.b8, retained_target.guid_bytes.size(), retained_target.guid_bytes.begin());
+      retained_target.device_id = *retained_game_device_id;
+      retained_target.backend = VDISPLAY::ensure_display_backend_e::sunshine;
+      exclusive_retained_catalog_owner =
+        VDISPLAY::tracked_display_cleanup_target_matches(retained_target) &&
+        VDISPLAY::supportsRequestedResolutionCatalog();
+    }
+#endif
     const bool joining_existing_game_output =
       secondary_game_client || remote_session::joins_existing_game_output(
         remote_session::role_e::game,
         !no_active_sessions,
-        retained_game_output_ready
+        retained_game_output_ready,
+        exclusive_retained_catalog_owner
       );
 
     std::unordered_map<std::string, std::string> requested_runtime_overrides;
@@ -5470,7 +5815,7 @@ namespace nvhttp {
     const bool is_input_only = config::input.enable_input_only_mode && current_appid == proc::input_only_app_id;
     const bool allow_display_changes = config::video.dd.config_revert_on_disconnect && !is_input_only;
     const bool allow_session_display_changes = allow_display_changes && !joining_existing_game_output;
-    if (no_active_sessions && allow_session_display_changes) {
+    if (no_active_sessions && allow_session_display_changes && !exclusive_retained_catalog_owner) {
       config::set_runtime_output_name_override(std::nullopt);
     }
     if (no_active_sessions && args.find("localAudioPlayMode"s) != std::end(args)) {
@@ -5488,6 +5833,13 @@ namespace nvhttp {
     }
 
     auto launch_session = make_launch_session_from_snapshot(host_audio, is_input_only, args, verified_client, &request_client_identity, request);
+#ifndef _WIN32
+    if (launch_session->requested_resolution_only) {
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Requested-resolution catalog requires the Windows bundled virtual display producer control 3.8 or later.");
+      return;
+    }
+#endif
     request_audio_hold.attach(launch_session->audio_context_guard);
     if (!proc::proc.allow_client_commands || !verified_client->allow_client_commands) {
       launch_session->client_do_cmds.clear();
@@ -5557,7 +5909,7 @@ namespace nvhttp {
         active_game.normal_vdd_identity_token,
         active_game.client_uuid
       );
-    if (retained_resume_owner_eligible &&
+    if (!exclusive_retained_catalog_owner && retained_resume_owner_eligible &&
         retained_game_output &&
         VDISPLAY::policy::should_rearm_retained_game_output_recovery(
           no_active_sessions,
@@ -5626,16 +5978,17 @@ namespace nvhttp {
       std::chrono::steady_clock::now() +
       display_helper_integration::kStreamStartApplyVerificationTimeout;
     const auto display_startup_cancelled = [display_startup_deadline] {
-      return std::chrono::steady_clock::now() >= display_startup_deadline;
+      const auto shutdown_event = mail::man ? mail::man->event<bool>(mail::shutdown) : nullptr;
+      return (shutdown_event && shutdown_event->peek()) ||
+             std::chrono::steady_clock::now() >= display_startup_deadline;
     };
+    const auto disarm_startup_restore = make_stream_start_restore_disarm(
+      display_startup_cancelled,
+      display_startup_deadline
+    );
     if (allow_session_display_changes) {
-      // Stop any in-flight helper restore loop before resuming display changes.
-      request_audio_hold.before([&] {
-        (void) display_helper_integration::disarm_pending_restore(
-          display_startup_cancelled,
-          display_startup_deadline
-        );
-      });
+      // The admission path also uses this attempt for on-demand recreation.
+      request_audio_hold.before(disarm_startup_restore);
     }
 #endif
     launch_session->secondary_game_client = secondary_game_client;
@@ -5667,7 +6020,7 @@ namespace nvhttp {
         return;
       }
 
-      if (!launch_session->virtual_display) {
+      if (!launch_session->virtual_display_catalog_error.empty() || !launch_session->virtual_display) {
         return;
       }
 
@@ -5685,6 +6038,13 @@ namespace nvhttp {
         );
       }
     });
+    if (joining_existing_game_output && (launch_session->requested_resolution_only ||
+        !VDISPLAY::allowsSharedCatalogCapture())) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 409);
+      tree.put("root.<xmlattr>.status_message", "Requested-resolution catalog is private, or the existing capture catalog could not be verified; this client cannot share it.");
+      return;
+    }
     if (!joining_existing_game_output) {
       prepare_virtual_display_for_session(
         launch_session,
@@ -5695,9 +6055,17 @@ namespace nvhttp {
         pending_output_override,
         pending_adapter_hint,
         retained_resume_owner_eligible ? &retained_resume_recovery_rearm : nullptr,
+        disarm_startup_restore,
         display_startup_cancelled,
-        display_startup_deadline
+        display_startup_deadline,
+        retained_resume_owner_eligible
       );
+    }
+    if (!launch_session->virtual_display_catalog_error.empty()) {
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", launch_session->virtual_display_catalog_error);
+      tree.put("root.resume", 0);
+      return;
     }
     if (launch_session->normal_vdd_capacity_rejected) {
       tree.put("root.resume", 0);
@@ -5776,10 +6144,7 @@ namespace nvhttp {
         revert_display_configuration = allow_session_display_changes || launch_session->virtual_display_failed;
 
 #ifdef _WIN32
-        (void) display_helper_integration::disarm_pending_restore(
-          display_startup_cancelled,
-          display_startup_deadline
-        );
+        disarm_startup_restore();
         auto request = display_helper_integration::helpers::build_request_from_session(config::video, *launch_session);
         if (!request) {
           BOOST_LOG(warning) << "Display helper: no display configuration request; using the existing display.";
@@ -5995,6 +6360,14 @@ namespace nvhttp {
       return;
     }
 
+    host_stream_control::activity_guard_t activity;
+    if (!activity) {
+      tree.put("root.cancel", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Host end-stream cleanup is in progress. Retry after it completes.");
+      return;
+    }
+
     const bool has_running_app = proc::proc.running() > 0;
     if (!has_running_app) {
       // Natural app exit clears its owner before the client sends the final
@@ -6078,8 +6451,9 @@ namespace nvhttp {
     const auto appid = get_arg(args, "appid", "0");
     const auto appuuid = get_arg(args, "appuuid", "");
     const auto current_appid = proc::proc.running();
-    const auto synthetic_control = remote_session::identify(util::from_view(appid), appuuid, current_appid);
-    auto app_ctx = proc::proc.resolve_app(appid, appuuid);
+    const auto synthetic_control = remote_session::identify(util::from_view(appid), appuuid, current_appid, remote_configured_catalogue(proc::proc.get_apps()));
+    auto app_ctx = synthetic_control == remote_session::control_e::none ?
+      proc::proc.resolve_app(appid, appuuid) : std::nullopt;
     std::string app_image;
     if (app_ctx) {
       app_image = proc::validate_app_image_path(app_ctx->image_path);
@@ -7222,6 +7596,12 @@ namespace nvhttp {
     // Play statistics and achievements read the session log and SuccessStory's files.
     thread_pool_util::ThreadPool library_route_pool;
     library_route_pool.start(1);
+    hardware_metrics::service_t metrics_service {[] {
+      return platf::create_host_stats_provider();
+    }};
+    thread_pool_util::ThreadPool metrics_route_pool;
+    metrics_route_pool.start(1);
+    auto metrics_busy = std::make_shared<std::atomic_bool>(false);
 
     // Verify certificates after establishing connection
     https_server.verify = [](req_https_t req, SSL *ssl) {
@@ -7324,6 +7704,18 @@ namespace nvhttp {
     // a response and must never execute stale mutations after a client timeout.
     auto mutation_admission = std::make_shared<single_flight::admission_t>();
     auto run_blocking_nvhttp = [&blocking_route_pool, run_on_blocking_pool, mutation_admission](auto response, const char *operation, auto task) {
+#ifdef _WIN32
+      const bool terminal_fenced = std::string_view(operation) == "launch" ||
+                                   std::string_view(operation) == "resume" ||
+                                   std::string_view(operation) == "cancel" ||
+                                   std::string_view(operation) == "SleepAccepted";
+      if (terminal_fenced) {
+        dispatch::run_start(*mutation_admission, [&](auto admitted) {
+          run_on_blocking_pool(blocking_route_pool, std::move(admitted));
+        }, response, operation, std::move(task));
+        return;
+      }
+#endif
       dispatch::run_blocking(*mutation_admission, [&](auto admitted) {
         run_on_blocking_pool(blocking_route_pool, std::move(admitted));
       },
@@ -7345,6 +7737,34 @@ namespace nvhttp {
       run_discovery_nvhttp([resp = std::move(resp), req = std::move(req)]() mutable {
         serverinfo<SunshineHTTPS>(std::move(resp), std::move(req));
       });
+    };
+    https_server.resource["^/api/hardware-metrics$"]["GET"] =
+      [&metrics_service, &metrics_route_pool, metrics_busy, run_on_blocking_pool](auto resp, auto req) {
+        const auto access = hardware_metrics_access(req);
+        if (!access.enabled || !access.authenticated_viewer) {
+          write_hardware_metrics(std::move(resp), {403, {{"error", access.enabled ? "An authenticated viewer is required" : "Hardware metrics are disabled"}}});
+          return;
+        }
+        if (!hardware_metrics_has_running_video(req)) {
+          write_hardware_metrics(std::move(resp), {409, {{"error", "An active video stream is required"}}});
+          return;
+        }
+        if (metrics_busy->exchange(true)) {
+          write_hardware_metrics(std::move(resp), {503, {{"error", "Hardware metrics are busy"}}});
+          return;
+        }
+        run_on_blocking_pool(metrics_route_pool, [&metrics_service, metrics_busy, resp = std::move(resp), req = std::move(req)]() mutable {
+          auto release = util::fail_guard([metrics_busy] {
+            metrics_busy->store(false);
+          });
+          hardware_metrics_query(metrics_service, std::move(resp), std::move(req));
+        });
+      };
+    https_server.resource["^/power-actions/v1$"]["GET"] = [run_discovery_nvhttp](auto response, auto request) {
+      run_discovery_nvhttp([response, request] { get_power_action_capabilities(response, request); });
+    };
+    https_server.resource["^/power-actions/v1/sleep$"]["POST"] = [run_blocking_nvhttp](auto response, auto request) {
+      run_blocking_nvhttp(response, "SleepAccepted", [response, request] { post_sleep(response, request); });
     };
     https_server.resource["^/pair/?$"]["GET"] = pair<SunshineHTTPS>;
     https_server.resource["^/pair/?$"]["POST"] = pair<SunshineHTTPS>;
@@ -7487,6 +7907,10 @@ namespace nvhttp {
         return;
       }
     };
+#ifdef _WIN32
+    platf::hotkey::start_end_stream_hotkey();
+    auto stop_hotkey = util::fail_guard([] { platf::hotkey::stop_end_stream_hotkey(); });
+#endif
     std::thread ssl {accept_and_run, &https_server};
     std::thread tcp {accept_and_run, &http_server};
 
@@ -7514,6 +7938,10 @@ namespace nvhttp {
       platf::linux_private_display::request_process_shutdown_preserve();
     }
 #endif
+#ifdef _WIN32
+    platf::hotkey::stop_end_stream_hotkey();
+    stop_hotkey.disable();
+#endif
     pairing_expiry_worker.request_stop();
     pairing_expiry_worker.join();
 
@@ -7532,6 +7960,8 @@ namespace nvhttp {
     discovery_route_pool.join();
     library_route_pool.stop();
     library_route_pool.join();
+    metrics_route_pool.stop();
+    metrics_route_pool.join();
     webrtc_stream::shutdown_all_sessions();
     rtsp_stream::terminate_sessions(false);
     remote_session::notify_monitor_shutdown();
@@ -7543,7 +7973,10 @@ namespace nvhttp {
   }
 
   void revoke_paired_client_access(const std::string_view uuid) {
+    // Revocation takes effect even if terminal already owns runtime teardown.
     forget_tls_client_identities_for_uuid(uuid);
+    host_stream_control::activity_guard_t activity;
+    if (!activity) return;
     // The caller has already disabled or removed the live pairing record.
     // Cross the launch/resume gate before scanning sessions so any handler
     // that copied the old identity either fails its final live recheck or has
@@ -7575,6 +8008,8 @@ namespace nvhttp {
   }
 
   bool erase_all_clients() {
+    host_stream_control::activity_guard_t activity;
+    if (!activity) return false;
     if (!config::sunshine.flags[config::flag::FRESH_STATE] && !authorization_state_ready.load(std::memory_order_acquire)) return false;
     std::vector<p_named_cert_t> clients;
     {
@@ -7608,6 +8043,8 @@ namespace nvhttp {
   }
 
   bool find_and_stop_session(const std::string &uuid, bool graceful) {
+    host_stream_control::activity_guard_t activity;
+    if (!activity) return false;
     auto session = rtsp_stream::find_session(uuid);
     if (session) {
       stop_session(*session, graceful);
@@ -7617,6 +8054,8 @@ namespace nvhttp {
   }
 
   bool disconnect_client(const std::string &uuid) {
+    host_stream_control::activity_guard_t activity;
+    if (!activity) return false;
     // Capture the generation before stopping transport. The join path may
     // retain it for Resume, while a newer launch admitted after this point
     // must never be released by this disconnect request.
@@ -7723,7 +8162,8 @@ namespace nvhttp {
     const std::string &virtual_display_layout,
     std::optional<std::unordered_map<std::string, std::string>> config_overrides,
     const bool prefer_10bit_sdr,
-    const std::optional<std::string> hdr_profile
+    const std::optional<std::string> hdr_profile,
+    const std::optional<bool> requested_resolution_only
   ) {
     if (uuid.empty()) {
       return false;
@@ -7761,6 +8201,7 @@ namespace nvhttp {
         named_cert->virtual_display_mode_override = trimmed_vd_mode;
         named_cert->virtual_display_layout_override = trimmed_vd_layout;
         named_cert->prefer_10bit_sdr = prefer_10bit_sdr;
+        if (requested_resolution_only) named_cert->requested_resolution_only = *requested_resolution_only;
         if (config_overrides) {
           named_cert->config_overrides = std::move(*config_overrides);
         }
@@ -7777,6 +8218,25 @@ namespace nvhttp {
       save_state();
     }
     return updated;
+  }
+
+  bool set_client_sleep_allowed(std::string_view uuid, bool allowed) {
+    const bool fresh_state = config::sunshine.flags[config::flag::FRESH_STATE];
+    if (!fresh_state && !authorization_state_ready.load(std::memory_order_acquire)) return false;
+    if (!fresh_state) statefile::migrate_recent_state_keys();
+    std::lock_guard state_lock(statefile::state_mutex());
+    std::lock_guard client_lock(client_mutex);
+    for (auto &client : client_root.named_devices) {
+      if (client->uuid != uuid) continue;
+      const bool previous = client->allow_sleep;
+      client->allow_sleep = allowed;
+      const bool saved = fresh_state || save_state_snapshot_locked(client_root);
+      // A failed grant cannot expand authority. A failed revocation remains
+      // denied in this process and is reported as an unsuccessful save.
+      if (!saved && allowed) client->allow_sleep = previous;
+      return saved;
+    }
+    return false;
   }
 
   bool set_client_hdr_profile(const std::string &uuid, const std::string &hdr_profile) {
@@ -7823,6 +8283,8 @@ namespace nvhttp {
     const std::string &virtual_display_layout,
     const bool prefer_10bit_sdr
   ) {
+    host_stream_control::activity_guard_t activity;
+    if (!activity) return false;
     if (name.size() > pairing_policy::max_paired_client_name_length) return false;
     const bool transient = config::sunshine.flags[config::flag::FRESH_STATE];
     if (!transient) statefile::migrate_recent_state_keys();
@@ -7876,6 +8338,8 @@ namespace nvhttp {
   // (Windows-only) display_helper_integration is included above
 
   bool unpair_client(const std::string_view uuid) {
+    host_stream_control::activity_guard_t activity;
+    if (!activity) return false;
     if (!config::sunshine.flags[config::flag::FRESH_STATE] &&
         !authorization_state_ready.load(std::memory_order_acquire)) {
       BOOST_LOG(error) << "Refusing to remove pairing state because durable state is unavailable."sv;
