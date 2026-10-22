@@ -108,9 +108,10 @@ struct sunshine_t {
 ''' + defaults + r'''
 } sunshine;
 const sunshine_t default_sunshine;
-int video, audio, stream, input, frame_limiter, rtss, lossless_scaling;
+int video, audio, stream, input, frame_limiter, rtss, lossless_scaling, igdb, scry;
 constexpr int default_video = 0, default_audio = 0, default_stream = 0,
-  default_input = 0, default_frame_limiter = 0, default_rtss = 0, default_lossless_scaling = 0;
+  default_input = 0, default_frame_limiter = 0, default_rtss = 0, default_lossless_scaling = 0,
+  default_igdb = 0, default_scry = 0;
 ''' + reset + helpers + entry + r'''
   apply_test_hook(1); // real reset is complete; old publication must survive
 ''' + parser + r'''

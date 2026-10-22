@@ -92,9 +92,10 @@ struct stream_t { std::chrono::milliseconds ping_timeout; };
 };
 ''' + default_stream + r'''
 // Unrelated config fields only satisfy the production reset helper's interface.
-int video, audio, input, frame_limiter, rtss, lossless_scaling;
+int video, audio, input, frame_limiter, rtss, lossless_scaling, igdb, scry;
 constexpr int default_video = 0, default_audio = 0, default_input = 0,
-  default_frame_limiter = 0, default_rtss = 0, default_lossless_scaling = 0;
+  default_frame_limiter = 0, default_rtss = 0, default_lossless_scaling = 0,
+  default_igdb = 0, default_scry = 0;
 struct sunshine_t { std::string username, password, salt, config_file, cmd; } sunshine;
 const sunshine_t default_sunshine;
 ''' + reset + r'''

@@ -50,5 +50,5 @@ exe=out/'production-terminal-composition'
 cmd=[a.compiler,'-std=c++23','-Wall','-Wextra','-Werror','-Wno-sign-compare','-Wno-missing-field-initializers','-pthread','-I',str(root)]
 for inc in (a.json_include+';'+a.boost_include).split(';'):
     if inc: cmd+=['-I',str(Path(inc).resolve())]
-subprocess.run(cmd+[str(cpp),str(root/'src/remote_display_topology.cpp'),'-o',str(exe)],check=True)
+subprocess.run(cmd+[str(cpp),str(root/'src/remote_display_topology.cpp'),str(root/'src/video_fec.cpp'),'-o',str(exe)],check=True)
 subprocess.run([str(exe)],check=True,timeout=20)

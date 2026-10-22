@@ -2,6 +2,9 @@
 #include "src/display_target_lease.h"
 #include "src/app_audio_termination.h"
 #include "src/remote_display_topology.h"
+// The fork's ANNOUNCE parser negotiates focus hints and dynamic FEC.
+#include "src/focus_hints.h"
+#include "src/video_fec.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -24,6 +27,7 @@
 #include <boost/system/error_code.hpp>
 using namespace std::chrono_literals;
 using namespace std::string_view_literals;
+using namespace std::string_literals;
 #define BOOST_LOG(level) std::cerr
 constexpr unsigned SS_ENC_VIDEO=1, SS_ENC_AUDIO=2;
 struct Pause {
@@ -54,11 +58,13 @@ namespace stream {
 struct monitor_t {
  int height=0,width=0,framerate=0,encodingFramerate=0,framerateX100=0,bitrate=0,client_requested_bitrate=0,slicesPerFrame=0,numRefFrames=0,encoderCscMode=0,videoFormat=0,dynamicRange=0,chromaSamplingType=0,enableIntraRefresh=0,packetsize=0,pyrowave_min_parity_shards=0;
  bool input_only=false,vrr_low_latency=false,force_sdr=false,prefer_sdr_10bit=false; std::uint64_t pyrowave_peer_link_bps=0,pyrowave_peer_pace_bps=0; int pyrowave_framing=0;
+ std::shared_ptr<video_fec::budget_t> fec_budget;
 };
 struct config_t {
  struct {bool input_only=false;std::array<bool,4> flags{}; int channels=0,mask=0,packetDuration=0; struct {int channelCount=0,streams=0,coupledStreams=0; std::array<unsigned,8> mapping{};} customStreamParams;} audio;
  monitor_t monitor;
  int controlProtocolType=0,packetsize=0,minRequiredFecPackets=0,mlFeatureFlags=0,audioQosType=0,videoQosType=0,encryptionFlagsEnabled=0;
+ bool focusHints=false; std::shared_ptr<video_fec::controller_t> fec_control; std::shared_ptr<video_fec::budget_t> fec_budget;
  int gen1_framegen_fix=0,gen2_framegen_fix=0,frame_generation_enabled=0,lossless_scaling_framegen=0,frame_generation_provider=0,lossless_scaling_target_fps=0,lossless_scaling_rtss_limit=0;
 };
 struct session_t {std::shared_ptr<void> audio_context_guard,display_power_guard;};
@@ -81,7 +87,7 @@ std::shared_ptr<session_t> alloc(const config_t &,auto &launch) {auto s=std::mak
 int start(session_t &,const std::string &) {++running;armed=true;return 0;}
 }
 }
-namespace config { struct {int fec_percentage=0,packetsize=0;std::chrono::seconds ping_timeout{5};} stream; struct {bool limit_framerate=false;int max_bitrate=0;} video; constexpr int PACKETSIZE_MIN=100,PACKETSIZE_MAX=2000,PACKETSIZE_SMALL=500,PACKETSIZE_LARGE=1400; constexpr int ENCRYPTION_MODE_MANDATORY=1; void maybe_apply_deferred() {} struct Gate {~Gate(){}}; Gate acquire_apply_read_gate(){return {};}}
+namespace config { struct {int fec_percentage=0,packetsize=0;std::chrono::seconds ping_timeout{5};} stream; struct {bool focus_hints=false;} input; struct {bool limit_framerate=false;int max_bitrate=0;} video; constexpr int PACKETSIZE_MIN=100,PACKETSIZE_MAX=2000,PACKETSIZE_SMALL=500,PACKETSIZE_LARGE=1400; constexpr int ENCRYPTION_MODE_MANDATORY=1; void maybe_apply_deferred() {} struct Gate {~Gate(){}}; Gate acquire_apply_read_gate(){return {};}}
 namespace video {int active_hevc_mode=3,active_av1_mode=3,active_pyrowave_mode=2;}
 namespace net {int encryption_mode_for_address(int) {return 0;}}
 namespace platf {std::uint64_t routed_link_bps(int,int){return 0;}}
