@@ -4,6 +4,7 @@
 ## options
 : "${_use_cuda:=detect}" # nvenc
 : "${_keep_going:=OFF}" # CI: ninja -k 0, report every compile error in one build
+: "${_tests_only:=OFF}" # CI: build and run the tests only; another runner builds the package
 
 : "${_commit:=@GITHUB_COMMIT@}"
 
@@ -216,23 +217,32 @@ build() {
 
     local _native_build_args=()
     [[ "${_keep_going}" == "ON" ]] && _native_build_args=(-- -k 0)
+    if [[ "${_tests_only}" == "ON" ]]; then
+      # Everything the default build makes except the host executable, which only the package needs.
+      python3 "$srcdir/$pkgname/scripts/build-linux-component-tests.py" tests build
+      return
+    fi
     cmake --build build "${_native_build_args[@]}"
 }
 
 check() {
     cd "${srcdir}/build"
-    ./vibepollo --version
-    if [[ "${_use_cuda::1}" == "t" ]]; then
-      # Verify the final binary actually contains native Pascal device code.
-      "${srcdir}/cuda/bin/cuobjdump" --list-elf ./vibepollo > cuda-device-code.txt
-      grep -q 'sm_61\.' cuda-device-code.txt
+    # Without the host executable (_tests_only), the runner building the package checks it.
+    if [[ "${_tests_only}" != "ON" ]]; then
+      ./vibepollo --version
+      if [[ "${_use_cuda::1}" == "t" ]]; then
+        # Verify the final binary actually contains native Pascal device code.
+        "${srcdir}/cuda/bin/cuobjdump" --list-elf ./vibepollo > cuda-device-code.txt
+        grep -q 'sm_61\.' cuda-device-code.txt
+      fi
     fi
     if [[ "${_build_tests:-ON}" != "OFF" ]]; then
-      ctest --test-dir . --output-on-failure --no-tests=error -j2
+      ctest --test-dir . --output-on-failure --no-tests=error -j"${BUILD_JOBS:-2}"
     fi
 }
 
 package() {
+    [[ "${_tests_only}" == "ON" ]] && return 0
     export MAKEFLAGS="${MAKEFLAGS:--j$(nproc)}"
     DESTDIR="$pkgdir" cmake --install build
 }

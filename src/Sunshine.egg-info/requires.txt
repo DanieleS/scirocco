@@ -1,0 +1,14 @@
+
+[flatpak]
+flatpak_pip_generator @ file:./packaging/linux/flatpak/deps/flatpak-builder-tools/pip
+
+[glad]
+glad2 @ file:./third-party/glad
+setuptools<82
+
+[lint]
+clang-format==20.*
+flake8==7.3.0
+
+[locale]
+Babel==2.18.0

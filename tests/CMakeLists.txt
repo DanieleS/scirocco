@@ -1261,12 +1261,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND SUNSHINE_TEST_ENABLE_COMPONENT)
                     COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
                         "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_${package_fixture}.py"
                         "${SUNSHINE_TEST_REPOSITORY_ROOT}" "vibepollo")
+                # COST: the slowest tests (20-220 s each on CI) start first instead of at the tail.
                 set_tests_properties("test_component_linux_${package_fixture}"
-                    PROPERTIES LABELS "component" TIMEOUT 240)
+                    PROPERTIES LABELS "component" TIMEOUT 240 COST 60)
             endforeach()
             # Recovery exercises real subprocess publication/crash checkpoints.
             set_tests_properties(test_component_linux_package_transaction_recovery
-                PROPERTIES TIMEOUT 600)
+                PROPERTIES TIMEOUT 600 COST 220)
             add_test(NAME test_component_linux_profile_upgrade
                 COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
                     "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_profile_upgrade.py"

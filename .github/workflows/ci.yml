@@ -285,6 +285,8 @@ jobs:
       # suites on pull requests; the Windows call above builds its tests (and runs the installer
       # driver-safety and bootstrap-migration steps) for the release build, as upstream does.
       build_tests: ${{ needs.release-candidate.outputs.should_release != 'true' }}
+      # Fork: no LTO or debug package where nothing ships (the release tag build keeps both).
+      verification_build: ${{ needs.release-candidate.outputs.should_release != 'true' }}
       use_self_hosted: ${{ needs.release-candidate.outputs.should_release == 'true' || (github.event_name == 'workflow_dispatch' && inputs.use_self_hosted) }}
       artifact_retention_days: ${{ needs.release-candidate.outputs.should_release == 'true' && 14 || 1 }}
       release_commit: ${{ needs.release-candidate.outputs.release_commit || github.sha }}

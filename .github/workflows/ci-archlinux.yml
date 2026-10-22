@@ -32,15 +32,30 @@ on:
       release_version:
         required: true
         type: string
+      # Fork addition: a build that only verifies the sources (pull requests, the master cache
+      # warm-up) skips LTO and the debug package, which nothing downloads. Each of the ~150 test
+      # executables was otherwise a single-threaded LTO link.
+      verification_build:
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build_archlinux:
-    name: Archlinux
+    # Fork addition: with tests, a second runner builds and runs them ("Archlinux tests") while
+    # this one builds the package without them, so the job takes the longer of the two halves
+    # instead of their sum.
+    name: Archlinux${{ matrix.part == 'tests' && ' tests' || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        part: ${{ fromJSON(inputs.build_tests && '["package", "tests"]' || '["package"]') }}
     env:
       _use_cuda: true
       GCC14_ARCHIVE_VERSION: 14.3.1+r416+g44d5743651c4-2
       CCACHE_DIR: ${{ github.workspace }}/.linux-cache/ccache
-      CCACHE_MAXSIZE: 1G
+      # Fork: 1G was full (108%) with the tests in it, so entries were evicted mid-build.
+      CCACHE_MAXSIZE: 2G
       CCACHE_COMPILERCHECK: content
       # Full toolkit installation is fresh job-local scratch, never a shared cache.
       CUDA_CACHE_DIR: ${{ github.workspace }}/.linux-cache/cuda
@@ -136,6 +151,13 @@ jobs:
           # Ninja links do not carry GNU make's jobserver. Keep each link's
           # LTO pool bounded instead of spawning nproc workers per link.
           echo 'LTOFLAGS="-flto=1"' >> /etc/makepkg.conf
+          if [[ "${{ inputs.verification_build }}" == "true" ]]; then
+            # Twice: adjacent options share the space each match consumes.
+            sed -i -E '/^OPTIONS=/ { s/([ (])(lto|debug)([ )])/\1!\2\3/g; s/([ (])(lto|debug)([ )])/\1!\2\3/g }' /etc/makepkg.conf
+            grep -E '^OPTIONS=' /etc/makepkg.conf
+            grep -Eq '^OPTIONS=.*!lto' /etc/makepkg.conf
+            ! grep -Eq '^OPTIONS=.*[ (](lto|debug)[ )]' /etc/makepkg.conf
+          fi
 
       - name: Verify CUDA release policy
         if: inputs.build_tests
@@ -143,6 +165,7 @@ jobs:
         run: python3 tests/unit/test_cuda_release_policy.py
 
       - name: Compile Vibepollo DRM against Arch kernel
+        if: matrix.part == 'package'
         shell: bash
         run: |
           set -euo pipefail
@@ -314,8 +337,12 @@ jobs:
           chown -R builder:builder .linux-cache
           ccache --set-config=base_dir="$GITHUB_WORKSPACE"
 
+      # Fork: not on GitHub-hosted runners. The 5.5 GB entry took over half of the repository's
+      # 10 GB cache quota, evicting the compiler caches, and restoring it (~65 s) is slower than
+      # downloading the installer from NVIDIA (~45 s).
       - name: Restore checksum-verified CUDA installer
         id: cuda-cache
+        if: github.repository == 'Nonary/Vibepollo'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: pkg/cuda-x86_64.run
@@ -325,20 +352,21 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: .linux-cache/ccache
-          key: ${{ inputs.cache_namespace }}-ccache-${{ runner.arch }}-${{ steps.toolchain.outputs.abi }}-${{ hashFiles('packaging/linux/Arch/PKGBUILD', '.github/workflows/ci-archlinux.yml', 'scripts/prepare-linux-cuda.sh', 'scripts/seed-linux-package-source.sh', 'scripts/check-linux-partial-cache.sh', 'scripts/build-linux-component-tests.py') }}-${{ inputs.release_commit }}
+          key: ${{ inputs.cache_namespace }}-ccache-${{ matrix.part }}-${{ runner.arch }}-${{ steps.toolchain.outputs.abi }}-${{ hashFiles('packaging/linux/Arch/PKGBUILD', '.github/workflows/ci-archlinux.yml', 'scripts/prepare-linux-cuda.sh', 'scripts/seed-linux-package-source.sh', 'scripts/check-linux-partial-cache.sh', 'scripts/build-linux-component-tests.py') }}-${{ inputs.release_commit }}
           # Fork addition, the last line: the toolchain fingerprint covers every installed package, and
           # a rolling distro changes it almost daily, so an exact-ABI cache is rarely there. Any
           # earlier cache still helps: CCACHE_COMPILERCHECK=content drops entries from another compiler.
           restore-keys: |
-            ${{ inputs.cache_namespace }}-ccache-${{ runner.arch }}-${{ steps.toolchain.outputs.abi }}-${{ hashFiles('packaging/linux/Arch/PKGBUILD', '.github/workflows/ci-archlinux.yml', 'scripts/prepare-linux-cuda.sh', 'scripts/seed-linux-package-source.sh', 'scripts/check-linux-partial-cache.sh', 'scripts/build-linux-component-tests.py') }}-
-            ${{ inputs.cache_namespace }}-ccache-${{ runner.arch }}-
+            ${{ inputs.cache_namespace }}-ccache-${{ matrix.part }}-${{ runner.arch }}-${{ steps.toolchain.outputs.abi }}-${{ hashFiles('packaging/linux/Arch/PKGBUILD', '.github/workflows/ci-archlinux.yml', 'scripts/prepare-linux-cuda.sh', 'scripts/seed-linux-package-source.sh', 'scripts/check-linux-partial-cache.sh', 'scripts/build-linux-component-tests.py') }}-
+            ${{ inputs.cache_namespace }}-ccache-${{ matrix.part }}-${{ runner.arch }}-
 
       - name: Build PKGBUILD
         id: build
         shell: bash
         working-directory: pkg
         env:
-          _build_tests: ${{ inputs.build_tests && 'ON' || 'OFF' }}
+          _build_tests: ${{ matrix.part == 'tests' && 'ON' || 'OFF' }}
+          _tests_only: ${{ matrix.part == 'tests' && 'ON' || 'OFF' }}
           # Keep compiling past the first error: one CI run reports all of them.
           _keep_going: 'ON'
         run: |
@@ -365,6 +393,10 @@ jobs:
             compiler_log="$PWD/compiler-cache.log"
             package_options=(-s --holdver)
           fi
+          if [[ "$_tests_only" == "ON" ]]; then
+            # No package from this runner: nothing to install, nothing to archive.
+            package_options=("${package_options[@]/#-si/-s}" --noarchive)
+          fi
           sudo -u builder env \
             CCACHE_DIR="$CCACHE_DIR" \
             CCACHE_MAXSIZE="$CCACHE_MAXSIZE" \
@@ -374,6 +406,7 @@ jobs:
             _use_cuda="${_use_cuda}" \
             _build_tests="${_build_tests}" \
             _keep_going="${_keep_going}" \
+            _tests_only="${_tests_only}" \
             _validation_expected_tree="$validation_tree" \
             BUILD_JOBS="$BUILD_JOBS" \
             CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL}" \
@@ -386,6 +419,7 @@ jobs:
           echo "::remove-matcher owner=gcc::"
 
       - name: Verify Arch package contract
+        if: matrix.part == 'package'
         shell: bash
         working-directory: pkg
         run: |
@@ -490,6 +524,7 @@ jobs:
           grep -Fq 'vibeshine-drm-install install-package' <<< "${package_install_script}"
 
       - name: Copy Artifacts
+        if: matrix.part == 'package'
         shell: bash
         run: |
           # create artifacts directory
@@ -504,6 +539,7 @@ jobs:
           ls -la artifacts/
 
       - name: Upload Artifacts
+        if: matrix.part == 'package'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: build-Archlinux
@@ -533,7 +569,7 @@ jobs:
 
       - name: Save checksum-verified CUDA installer
         if: >-
-          always() && steps.cuda-cache.outputs.cache-hit != 'true' &&
+          always() && github.repository == 'Nonary/Vibepollo' && steps.cuda-cache.outputs.cache-hit != 'true' &&
           ((success() && (github.ref_name == github.event.repository.default_branch ||
             (github.event_name == 'workflow_dispatch' && github.event.repository.full_name == github.repository))) ||
            steps.partial-cache.outputs.cuda == 'true')
@@ -551,7 +587,7 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: .linux-cache/ccache
-          key: ${{ inputs.cache_namespace }}-ccache-${{ runner.arch }}-${{ steps.toolchain.outputs.abi }}-${{ hashFiles('packaging/linux/Arch/PKGBUILD', '.github/workflows/ci-archlinux.yml', 'scripts/prepare-linux-cuda.sh', 'scripts/seed-linux-package-source.sh', 'scripts/check-linux-partial-cache.sh', 'scripts/build-linux-component-tests.py') }}-${{ inputs.release_commit }}
+          key: ${{ inputs.cache_namespace }}-ccache-${{ matrix.part }}-${{ runner.arch }}-${{ steps.toolchain.outputs.abi }}-${{ hashFiles('packaging/linux/Arch/PKGBUILD', '.github/workflows/ci-archlinux.yml', 'scripts/prepare-linux-cuda.sh', 'scripts/seed-linux-package-source.sh', 'scripts/check-linux-partial-cache.sh', 'scripts/build-linux-component-tests.py') }}-${{ inputs.release_commit }}
 
       - name: Restore self-hosted workspace ownership
         if: always() && runner.environment == 'self-hosted'

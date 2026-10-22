@@ -1,0 +1,9 @@
+LICENSE
+NOTICE
+README.md
+pyproject.toml
+src/Sunshine.egg-info/PKG-INFO
+src/Sunshine.egg-info/SOURCES.txt
+src/Sunshine.egg-info/dependency_links.txt
+src/Sunshine.egg-info/requires.txt
+src/Sunshine.egg-info/top_level.txt

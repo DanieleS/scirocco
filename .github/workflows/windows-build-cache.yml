@@ -49,3 +49,5 @@ jobs:
       release_version: ${{ format('2.0.0-dev.{0}', github.run_number) }}
       # Tests too, as for Windows: pull requests build them.
       build_tests: true
+      # Same flags as pull requests, or their objects wouldn't match.
+      verification_build: true
