@@ -1,12 +1,15 @@
-// winsock2.h must come before windows.h, which the dispatcher headers pull in.
 #ifdef _WIN32
-#include "src/platform/windows/display_helper_borrow_native.h"
+// MinGW's threading headers can import windows.h before the native helper header.
+#include <winsock2.h>
 #endif
 
 #include "src/platform/windows/display_helper_v2/async_dispatcher.h"
 
 #include "src/platform/windows/display_helper_v2/diagnostics.h"
 #include "src/platform/windows/display_helper_borrow_gate.h"
+#ifdef _WIN32
+#include "src/platform/windows/display_helper_borrow_native.h"
+#endif
 
 namespace display_helper::v2 {
   AsyncDispatcher::AsyncDispatcher(

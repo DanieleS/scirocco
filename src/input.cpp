@@ -25,6 +25,7 @@ extern "C" {
 #include "globals.h"
 #include "input.h"
 #include "input_activity_policy.h"
+#include "input_geometry_policy.h"
 #include "logging.h"
 #include "mouse_input.h"
 #include "platform/common.h"
@@ -273,6 +274,10 @@ namespace input {
     std::atomic_bool input_queue_task_scheduled;
     // Protected by input_queue_lock; reset permanently closes this context.
     bool input_closed = false;
+
+    geometry::transport_t geometry_transport;
+    // The worker consumes only newer touch-port event versions.
+    std::uint64_t observed_touch_port_event_generation {};
 
     thread_pool_util::ThreadPool::task_id_t mouse_left_button_timeout;
     bool mouse_left_button_delay = true;
@@ -623,6 +628,59 @@ namespace input {
     mouse_controller->move_relative({util::endian::big(packet->deltaX), util::endian::big(packet->deltaY)});
   }
 
+  geometry::contact_event_e geometry_contact_event(const std::uint8_t event_type) {
+    switch (event_type) {
+      case LI_TOUCH_EVENT_HOVER:
+        return geometry::contact_event_e::hover;
+      case LI_TOUCH_EVENT_DOWN:
+        return geometry::contact_event_e::down;
+      case LI_TOUCH_EVENT_MOVE:
+        return geometry::contact_event_e::move;
+      case LI_TOUCH_EVENT_UP:
+        return geometry::contact_event_e::up;
+      case LI_TOUCH_EVENT_CANCEL:
+        return geometry::contact_event_e::cancel;
+      case LI_TOUCH_EVENT_CANCEL_ALL:
+        return geometry::contact_event_e::cancel_all;
+      default:
+        return geometry::contact_event_e::other;
+    }
+  }
+
+  void cancel_geometry_contacts(input_t &input) {
+    if (!input.client_context) return;
+    platf::touch_input_t touch {};
+    touch.eventType = LI_TOUCH_EVENT_CANCEL_ALL;
+    platf::touch_update(input.client_context.get(), {}, touch);
+    platf::pen_input_t pen {};
+    pen.eventType = LI_TOUCH_EVENT_CANCEL_ALL;
+    platf::pen_update(input.client_context.get(), {}, pen);
+  }
+
+  void refresh_input_geometry(const std::shared_ptr<input_t> &input) {
+    if (!input) return;
+    {
+      std::lock_guard<std::mutex> lock(input->input_queue_lock);
+      if (input->input_closed) return;
+    }
+    const auto latest = input->touch_port_event->view_if_newer(input->observed_touch_port_event_generation);
+    if (!latest) return;
+    const platf::input_geometry_snapshot_t snapshot {
+      latest->capture_generation,
+      latest->geometry_sequence,
+      latest->geometry_valid,
+      latest->geometry_target,
+      latest->offset_x,
+      latest->offset_y,
+      latest->env_width,
+      latest->env_height,
+    };
+    input->geometry_transport.refresh_from_event(snapshot, input->touch_port, *latest, [&] {
+      // Runs before replacing the map, on the serialized input worker.
+      cancel_geometry_contacts(*input);
+    });
+  }
+
   /**
    * @brief Converts client coordinates on the specified surface into screen coordinates.
    * @param input The input context.
@@ -631,15 +689,9 @@ namespace input {
    * @return The host-relative coordinate pair if a touchport is available.
    */
   std::optional<std::pair<float, float>> client_to_touchport(std::shared_ptr<input_t> &input, const std::pair<float, float> &val, const std::pair<float, float> &size) {
-    auto &touch_port_event = input->touch_port_event;
     auto &touch_port = input->touch_port;
-    // Browser viewers have separate input ownership but share capture metadata.
-    // Read the latest port without consuming it or blocking the input worker.
-    if (auto latest_port = touch_port_event->view(0ms)) {
-      touch_port = *latest_port;
-    }
     if (!touch_port) {
-      BOOST_LOG(verbose) << "Ignoring early absolute input without a touch port"sv;
+      BOOST_LOG(verbose) << "Ignoring absolute input while capture geometry is unavailable"sv;
       return std::nullopt;
     }
 
@@ -1217,6 +1269,19 @@ namespace input {
       return;
     }
 
+    const auto event = geometry_contact_event(packet->eventType);
+    const auto pointer_id = util::endian::little(packet->pointerId);
+    if (event == geometry::contact_event_e::cancel_all) {
+      input->geometry_transport.touch(event, pointer_id, static_cast<bool>(input->touch_port));
+      platf::touch_input_t cancel {};
+      cancel.eventType = LI_TOUCH_EVENT_CANCEL_ALL;
+      platf::touch_update(input->client_context.get(), {}, cancel);
+      return;
+    }
+    if (input->geometry_transport.touch(event, pointer_id, static_cast<bool>(input->touch_port)) == geometry::contact_result_e::suppress) {
+      return;
+    }
+
     // Convert the client normalized coordinates to touchport coordinates
     auto coords = client_to_touchport(input, {from_clamped_netfloat(packet->x, 0.0f, 1.0f) * 65535.f, from_clamped_netfloat(packet->y, 0.0f, 1.0f) * 65535.f}, {65535.f, 65535.f});
     if (!coords) {
@@ -1247,7 +1312,7 @@ namespace input {
     platf::touch_input_t touch {
       packet->eventType,
       rotation,
-      util::endian::little(packet->pointerId),
+      pointer_id,
       coords->first,
       coords->second,
       from_clamped_netfloat(packet->pressureOrDistance, 0.0f, 1.0f),
@@ -1265,6 +1330,18 @@ namespace input {
    */
   void passthrough(std::shared_ptr<input_t> &input, PSS_PEN_PACKET packet) {
     if (!config::input.mouse) {
+      return;
+    }
+
+    const auto event = geometry_contact_event(packet->eventType);
+    if (event == geometry::contact_event_e::cancel_all) {
+      input->geometry_transport.pen(event, static_cast<bool>(input->touch_port));
+      platf::pen_input_t cancel {};
+      cancel.eventType = LI_TOUCH_EVENT_CANCEL_ALL;
+      platf::pen_update(input->client_context.get(), {}, cancel);
+      return;
+    }
+    if (input->geometry_transport.pen(event, static_cast<bool>(input->touch_port)) == geometry::contact_result_e::suppress) {
       return;
     }
 
@@ -1814,6 +1891,10 @@ namespace input {
    * @param input The input context pointer.
    */
   void passthrough_next_message(std::shared_ptr<input_t> input) {
+    // Geometry notifications share the input worker with packets and synthetic
+    // repeats, so cancellation and map replacement remain serialized.
+    refresh_input_geometry(input);
+
     // 'entry' backs the 'payload' pointer, so they must remain in scope together
     queued_input_packet_t entry;
     PNV_INPUT_HEADER payload;
@@ -1975,6 +2056,27 @@ namespace input {
     }
   }
 
+  void input_geometry_refresh_tick(std::weak_ptr<input_t> weak_input) {
+    auto input = weak_input.lock();
+    if (!input) return;
+
+    bool schedule_worker = false;
+    {
+      std::lock_guard<std::mutex> lock(input->input_queue_lock);
+      if (input->input_closed) return;
+      schedule_worker = geometry::request_serialized_worker_wake(input->input_queue_task_scheduled);
+    }
+    if (schedule_worker) task_pool.push(passthrough_next_message, input);
+
+    // The recurring timer holds only a weak reference and stops when reset
+    // seals the session input queue.
+    task_pool.pushDelayed(input_geometry_refresh_tick, 50ms, weak_input);
+  }
+
+  void start_input_geometry_refresh(const std::shared_ptr<input_t> &input) {
+    task_pool.pushDelayed(input_geometry_refresh_tick, 50ms, std::weak_ptr<input_t> {input});
+  }
+
   /**
    * @brief Called on the control stream thread to queue an input message.
    * @param input The input context pointer.
@@ -2053,7 +2155,7 @@ namespace input {
         input->guide_permission_state.load(std::memory_order_acquire),
         (permission & crypto::PERM::input_controller) != crypto::PERM::_no,
       });
-      schedule_input_task = !input->input_queue_task_scheduled.exchange(true, std::memory_order_acq_rel);
+      schedule_input_task = geometry::request_serialized_worker_wake(input->input_queue_task_scheduled);
     }
     if (schedule_input_task) {
       task_pool.push(passthrough_next_message, input);
@@ -2160,6 +2262,7 @@ namespace input {
       guide_button
     );
     input->persist_gamepads = persist_gamepads;
+    start_input_geometry_refresh(input);
 
     // Workaround to ensure new frames will be captured when a client connects
     task_pool.pushDelayed([]() {

@@ -71,6 +71,7 @@ namespace stream::broadcast_runtime {
         const auto encoder_kbps = session.encoder_bitrate ? session.encoder_bitrate(bitrate_kbps) : bitrate_kbps;
         session.bitrate.get() = encoder_kbps;
         session.client_requested_bitrate.get() = bitrate_kbps;
+        session.pacing_bitrate_kbps.get().store(bitrate_kbps, std::memory_order_relaxed);
         session.bitrate_events->raise(encoder_kbps);
         ++updated;
       }
