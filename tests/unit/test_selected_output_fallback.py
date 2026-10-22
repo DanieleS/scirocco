@@ -40,7 +40,11 @@ launch = (args.source_dir / "nvhttp.cpp").read_text()
 display = (args.source_dir / "display_device.cpp").read_text()
 config_header = (args.source_dir / "config.h").read_text()
 request_helpers = (args.source_dir / "platform/windows/display_helper_request_helpers.cpp").read_text()
-request_builder = function(request_helpers, "std::optional<DisplayApplyRequest> build_request_from_session(")
+# The two-argument overload forwards; the policy input lives in the one taking the log-detail flag.
+request_builder = function(request_helpers, "std::optional<DisplayApplyRequest> build_request_from_session(\n"
+                           "    const config::video_t &video_config,\n"
+                           "    const rtsp_stream::launch_session_t &session,\n"
+                           "    const bool include_request_detail_log_fields")
 request_policy_input = request_builder[request_builder.index("{") + 1:request_builder.index("    if (!policy.dispatch)")]
 constructor_start = request_helpers.index("SessionDisplayConfigurationHelper::SessionDisplayConfigurationHelper(")
 constructor_end = request_helpers.index("  std::optional<display_device::Resolution>", constructor_start)
@@ -221,7 +225,8 @@ namespace display_helper_integration::helpers {
     const config::video_t &video_config_;
     config::video_t effective_video_config_;
     const rtsp_stream::launch_session_t &session_;
-    SessionDisplayConfigurationHelper(const config::video_t &, const rtsp_stream::launch_session_t &, bool = false);
+    bool include_request_detail_log_fields_;
+    SessionDisplayConfigurationHelper(const config::video_t &, const rtsp_stream::launch_session_t &, bool = false, bool = true);
   };
 ''' + constructor + r'''
   // Exercise the actual builder's dispatch input, actual helper constructor's
@@ -244,6 +249,8 @@ std::optional<display_device::SingleDisplayConfiguration::DevicePreparation> las
 bool prepare(bool has_app_output_override = false, bool request_virtual_display = false) {
   bool no_active_sessions = true;
   auto launch_session = std::make_shared<rtsp_stream::launch_session_t>(launch_settings);
+  // The resolver parameter that decides whether logs may name the selected output.
+  [[maybe_unused]] const bool include_identity_log_fields = true;
   if (has_app_output_override) launch_session->output_name_override = config::output;
 ''' + apollo_request_transport + validation + fallback + r'''
   last_request_preparation = display_helper_integration::helpers::request_preparation(config::video, *launch_session);

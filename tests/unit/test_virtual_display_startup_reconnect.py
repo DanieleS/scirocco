@@ -317,6 +317,8 @@ bool first_launch_tv_off(Time deadline) {
   [[maybe_unused]] std::optional<std::string> app_output_override, pending_output_override;
   struct TVSession { std::optional<std::string> output_name_override, virtual_display_mode_override; };
   [[maybe_unused]] TVSession session, *launch_session = &session;
+  // The resolver parameter that decides whether logs may name the dropped output.
+  [[maybe_unused]] const bool include_identity_log_fields = true;
 ''' + tv_block + r'''
   return request_virtual_display && admit(deadline, [=] { return fake_now >= deadline; });
 }
@@ -683,6 +685,7 @@ void prepare_resume(ResumeSession &session, bool request_virtual_display) {
   auto reserve_normal_vdd_identity = [] { return identity_available; };
   auto apply_framegen_refresh_policy = [](bool) {};
   const auto display_startup_deadline = fake_now + 2s;
+  [[maybe_unused]] const bool include_identity_log_fields = true;
   const std::function<bool()> display_startup_cancelled = [] { return false; };
   [[maybe_unused]] const std::function<void()> disarm_startup_restore = [&] {
     (void) display_helper_integration::disarm_pending_restore(display_startup_cancelled, display_startup_deadline, true);
@@ -758,8 +761,9 @@ namespace rtsp_stream {
 int disabled_requests = 0, creation_mutations = 0, preapply_requests = 0, apply_calls = 0;
 Time entry_deadline {}, apply_deadline {};
 bool entry_input_only = false;
+namespace dispatch { bool include_request_identity_log_fields(int) { return false; } }
 std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session_from_snapshot(
-  int, bool input_only, int, int, const int *, int) {
+  int, bool input_only, int, int, const int *, int, bool = true, bool = true) {
   require(reset_calls == 1 || shutting_down || fake_now >= entry_deadline,
           "ordinary session construction bypassed unconditional production preflight");
   auto session = std::make_shared<rtsp_stream::launch_session_t>();
@@ -770,7 +774,7 @@ namespace display_helper_integration {
   constexpr auto kStreamStartApplyVerificationTimeout = 2s;
   enum class ApplyRetryPolicy { StreamStart };
   namespace helpers {
-    std::optional<int> build_request_from_session(int, const rtsp_stream::launch_session_t &) {
+    std::optional<int> build_request_from_session(int, const rtsp_stream::launch_session_t &, bool = true) {
       ++preapply_requests;
       return 1;
     }
@@ -786,7 +790,8 @@ void prepare_virtual_display_for_session(
   std::optional<video::encoder_probe_adapter_hint_lease_t> &,
   VDISPLAY::policy::retained_resume_recovery_rearm_t *,
   const std::function<void()> &disarm_startup_restore,
-  const std::function<bool()> &display_startup_cancelled, Time display_startup_deadline) {
+  const std::function<bool()> &display_startup_cancelled, Time display_startup_deadline,
+  bool = false, bool = true) {
   entry_deadline = display_startup_deadline;
   auto disable_virtual_display_request = [] { ++disabled_requests; };
 """ + input_guard + r"""
@@ -797,6 +802,7 @@ void prepare_virtual_display_for_session(
 void production_ordinary_launch_entry(int appid, const std::string &appuuid_str) {
   audio::display_change_hold_t request_audio_hold {[] { return std::shared_ptr<void>{}; }};
   int host_audio = 0, args = 0, verified_client = 0, request_client_identity = 0, request = 0;
+  [[maybe_unused]] const int trace_id = 0;
   bool no_active_sessions = true;
   [[maybe_unused]] bool revert_display_configuration = false;
 """ + classification + r"""

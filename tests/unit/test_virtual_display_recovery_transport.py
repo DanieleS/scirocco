@@ -50,7 +50,8 @@ production_ensure = extract_function(
 )
 production_control_snapshot = extract_function(
     SOURCE,
-    "std::shared_ptr<sunshine_driver::WindowsControlTransport> control_transport_snapshot()",
+    # The definition, not the forward declaration near the top of the file.
+    "std::shared_ptr<sunshine_driver::WindowsControlTransport> control_transport_snapshot() {",
 )
 production_replace_transport = extract_function(
     SOURCE,
