@@ -47,11 +47,10 @@ code = r'''
 #include <thread>
 #include <vector>
 using namespace std::literals;
+using DWORD = std::uint32_t;
 #define BOOST_LOG(level) std::ostringstream{}
 #ifndef _WIN32
 constexpr int _TRUNCATE=0;
-// INamedPipe exposes the pipe peer process ID as a Win32 DWORD.
-using DWORD=std::uint32_t;
 template<size_t N> void wcsncpy_s(wchar_t (&out)[N], const wchar_t* in, int){std::wcsncpy(out,in,N-1);out[N-1]=0;}
 #endif
 struct TestClock {
