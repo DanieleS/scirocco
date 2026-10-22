@@ -20,6 +20,7 @@
 
 // local includes
 #include "audio.h"
+#include "capture_action.h"
 #include "crypto.h"
 #include "thread_safe.h"
 #include "video.h"
@@ -77,6 +78,10 @@ namespace stream {
     /// The client asked for text field focus hints and `focus_hints` is enabled. Fixed when
     /// the client answers DESCRIBE, so it holds for the whole session.
     bool focusHints = false;
+
+    /// Where the client's capture actions go; off unless it asked for them and the host has
+    /// a provider. Fixed when the client answers DESCRIBE, so it holds for the whole session.
+    capture_action::provider_t captureProvider = capture_action::provider_t::off;
 
     std::optional<int> gcmap;
     bool gcpersist = false;

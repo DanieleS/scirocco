@@ -801,6 +801,54 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### capture_provider
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            The tool on this PC that takes screenshots, saves the last few seconds of gameplay and
+            starts or stops recordings when a client asks for one from its in-game menu. The host
+            presses that tool's keyboard shortcut itself, so every client uses the same tool without
+            being configured.
+            <br><br>
+            Only clients that know the extension send these requests. Moonlight, Artemis and other
+            clients see no difference.
+            @note{The NVIDIA option uses the NVIDIA app's (or GeForce Experience's) default shortcuts,
+            Alt+F1, Alt+F10 and Alt+F9. Saving a replay only works when Instant Replay is turned on in
+            the NVIDIA app, and nothing happens if its shortcuts were changed.}
+            @note{Game Bar's "Record that" (Win+Alt+G) needs background recording turned on in Windows
+            settings under Gaming &gt; Captures.}
+            @note{This can be overridden per application.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            gamebar
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            capture_provider = nvidia
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="3">Choices</td>
+        <td>gamebar</td>
+        <td>Xbox Game Bar, available on every Windows PC.</td>
+    </tr>
+    <tr>
+        <td>nvidia</td>
+        <td>The NVIDIA app or GeForce Experience.</td>
+    </tr>
+    <tr>
+        <td>off</td>
+        <td>Clients hide their capture entries.</td>
+    </tr>
+</table>
+
 ### keybindings
 
 <table>
