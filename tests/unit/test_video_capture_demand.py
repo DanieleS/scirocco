@@ -7,6 +7,7 @@ capture IDs separately from simulated encoded packets; never open a display.
 from pathlib import Path
 import argparse
 import subprocess
+import re
 import sys
 import tempfile
 
@@ -26,6 +27,9 @@ def fixture(root):
     video = (root / 'src/video.cpp').read_text()
     capture = block(video, '  void captureThread(')
     callback = block(capture, 'auto push_captured_image_callback = ')
+    # The Windows recovery observer needs the real display and device list;
+    # the fixture's fake display has neither, so drop it on Windows hosts too.
+    callback = re.sub(r'#ifdef _WIN32\n(?:(?!#endif)[^\n]*\n)*?[^\n]*observe_recovery_capture_frame[^\n]*\n(?:(?!#endif)[^\n]*\n)*#endif\n', '', callback)
     create = next(line.strip() for line in capture.splitlines() if 'disp = platf::display(' in line)
     reset = next(line.strip() for line in capture.splitlines() if 'reset_display(disp,' in line)
     initial_loop = capture.index('while (capture_ctx_queue->running()) {')
