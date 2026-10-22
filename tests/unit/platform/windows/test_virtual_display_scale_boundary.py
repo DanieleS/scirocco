@@ -29,6 +29,7 @@ result_struct = re.search(r"  struct display_scale_result_t \{[\s\S]*?^  \};", h
 protocol = scale[scale.index("  constexpr std::array<std::uint32_t, 12> kWindowsScalePercentages"):scale.index("  std::optional<std::wstring> utf8_to_wide")]
 harness = r'''
 #include <algorithm>
+#include "tests/unit/display_helper_borrow_fixture.h"
 #include <array>
 #include <cassert>
 #include <cctype>
@@ -131,26 +132,27 @@ int main() {
   // Resolve only the exact stable identity, even without any GDI name. Retry
   // against a fresh enumeration after publication instead of capturing a name.
   devices=std::vector<Device>{{"{other}","virtual:other"},{"{wanted}",""}};
-  assert(!resolve_virtual_monitor_device_path_for_id("{wanted}"));
+  assert(!resolve_monitor_device_path_for_device_id("{wanted}"));
   devices->back().m_monitor_device_path="virtual:wanted";
-  assert(resolve_virtual_monitor_device_path_for_id("{WANTED}")==L"virtual:wanted");
-  assert(!resolve_virtual_monitor_device_path_for_id("{missing}"));
-  assert(!resolve_virtual_monitor_device_path_for_id(""));
+  assert(resolve_monitor_device_path_for_device_id("{WANTED}")==L"virtual:wanted");
+  assert(!resolve_monitor_device_path_for_device_id("{missing}"));
+  assert(!resolve_monitor_device_path_for_device_id(""));
+  // Exact device-ID lookup is generic: a physical device with that ID resolves too.
   devices->back().is_virtual=false;
-  assert(!resolve_virtual_monitor_device_path_for_id("{wanted}"));
+  assert(resolve_monitor_device_path_for_device_id("{wanted}")==L"virtual:wanted");
   devices=std::nullopt;
-  assert(!resolve_virtual_monitor_device_path_for_id("{wanted}"));
+  assert(!resolve_monitor_device_path_for_device_id("{wanted}"));
   std::cout << "Windows DPI sentinel, bounds, write failures, session retries, and stable identity regressions passed.\n";
 }
 '''
 harness = harness.replace("// PROTOCOL", protocol).replace("// RESULT", result_struct)
 harness = harness.replace("// SETTER", function(scale, "set_display_scale_percent"))
-harness = harness.replace("// RESOLVER", function(identity, "resolve_virtual_monitor_device_path_for_id"))
+harness = harness.replace("// RESOLVER", function(identity, "resolve_monitor_device_path_for_device_id"))
 with tempfile.TemporaryDirectory(prefix="vdisplay-scale-") as directory:
     source = pathlib.Path(directory) / "test.cpp"
     binary = pathlib.Path(directory) / "test"
     source.write_text(harness)
-    command = [sys.argv[1] if len(sys.argv)>1 else "c++", "-std=c++20", "-Wall", "-Wextra", "-Werror"]
+    command = [sys.argv[1] if len(sys.argv)>1 else "c++", "-std=c++20", "-Wall", "-Wextra", "-Werror", "-I", str(root)]
     try:
         subprocess.run(command + ["-fsanitize=undefined", "-fno-sanitize-recover=undefined", str(source), "-o", str(binary)], check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as error:

@@ -7,12 +7,20 @@ import argparse
 import pathlib
 import subprocess
 import tempfile
+import sys
 
 root = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(root / 'tests/input'))
+from test_delayed_mouse_release import function as production_function
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--source-dir', type=pathlib.Path, default=root / 'src')
 parser.add_argument('--include-directory', action='append', default=[])
+parser.add_argument('--compiler', default='g++')
+parser.add_argument('--include-dir', action='append', default=[],
+                    help='Dependency include path, repeatable; accepts CMake semicolon lists')
 args = parser.parse_args()
+dependency_includes = [flag for group in args.include_dir for path in group.split(';')
+                       if path for flag in ('-I', path)]
 source = args.source_dir
 include_arguments = []
 for value in args.include_directory:
@@ -53,7 +61,7 @@ finalize_function = ''
 resume_finalize = ''
 if '    void finalize_display_preparation(' in launch:
     start = launch.index('    void finalize_display_preparation(')
-    finalize_function = launch[start:launch.index('    static std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session_from_snapshot(', start)]
+    finalize_function = production_function(launch, 'void finalize_display_preparation(')
     resume_finalize = ' finalize_display_preparation(*launch_session, verified_client);'
 start = launch.index('    // A resume request carries no appid or appuuid')
 start = launch.index('          // launch_session->virtual_display is deliberately left alone:', start)
@@ -80,6 +88,7 @@ struct launch_session_t {
  struct app_metadata_t { bool virtual_screen = false; };
  std::optional<app_metadata_t> app_metadata;
  bool virtual_display = false, client_requests_virtual_display = false;
+ bool requested_resolution_only = false;
  bool virtual_display_preparation_override = false;
  std::optional<bool> display_preparation_client_virtual_override;
  std::string virtual_display_device_id;
@@ -100,6 +109,7 @@ struct App {
 };
 struct Client {
  bool always_use_virtual_display = false;
+ bool requested_resolution_only = false;
  std::string output_name_override, virtual_display_mode_override, virtual_display_layout_override, hdr_profile;
  std::unordered_map<std::string, std::string> config_overrides;
 };
@@ -161,7 +171,8 @@ class SessionDisplayConfigurationHelper {
 public:
  config::video_t video_config_, effective_video_config_;
  const rtsp_stream::launch_session_t &session_;
- SessionDisplayConfigurationHelper(const config::video_t &, const rtsp_stream::launch_session_t &, bool = false);
+ bool include_request_detail_log_fields_;
+ SessionDisplayConfigurationHelper(const config::video_t &, const rtsp_stream::launch_session_t &, bool = false, bool = true);
 };
 """ + constructor + r"""
 }
@@ -198,6 +209,11 @@ int main() {
    }
  };
  check("true inherited VerifyOnly", {}, {}, Prep::verify_only);
+ ++count;
+ if (assemble({}, {}, {})->requested_resolution_only) { std::cerr << "FAIL RTSP requested-resolution-only defaults false\n"; ++failed; }
+ Client requested_resolution_client; requested_resolution_client.requested_resolution_only = true;
+ ++count;
+ if (!assemble(requested_resolution_client, {}, {})->requested_resolution_only) { std::cerr << "FAIL RTSP requested-resolution-only propagates true\n"; ++failed; }
  App app; app.virtual_display_mode_override = Mode::per_client;
  check("app mode beats global VerifyOnly", {}, app, Prep::ensure_active);
  app = {}; app.virtual_display_layout_override = Layout::extended_primary;
@@ -303,5 +319,5 @@ with tempfile.TemporaryDirectory(prefix='session-display-precedence-') as tempor
     cpp = directory / 'test.cpp'
     cpp.write_text(program)
     binary = directory / 'test'
-    subprocess.run(['g++', '-std=c++20', '-Wall', '-Wextra', '-Werror', '-Wno-missing-field-initializers', '-I', str(source.parent), *include_arguments, str(cpp), str(source / 'platform/windows/display_helper_request_policy.cpp'), '-o', str(binary)], check=True)
+    subprocess.run([args.compiler, '-std=c++20', '-Wall', '-Wextra', '-Werror', '-Wno-missing-field-initializers', '-I', str(source.parent), *include_arguments, *dependency_includes, str(cpp), str(source / 'platform/windows/display_helper_request_policy.cpp'), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

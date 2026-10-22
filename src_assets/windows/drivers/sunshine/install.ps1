@@ -92,6 +92,88 @@ function Get-InfComponentVersion {
     return $versions[0]
 }
 
+function Invoke-DriverInstallSafetyQuery {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptText,
+        [int]$TimeoutSeconds = 15
+    )
+
+    if ($TimeoutSeconds -le 0) { throw 'Driver safety inventory requires a positive timeout. Driver unchanged.' }
+    return [string](Invoke-DriverInstallSafetyCommand -ScriptText $ScriptText -TimeoutSeconds $TimeoutSeconds)
+}
+
+function ConvertFrom-DriverInstallSafetyInventoryResult {
+    param([Parameter(Mandatory = $true)][string]$OutputText)
+
+    $markerPrefix = 'DRIVER_INSTALL_SAFETY_INVENTORY:'
+    $markerLines = @($OutputText -split '\r?\n' | Where-Object {
+        $_.StartsWith($markerPrefix, [StringComparison]::Ordinal)
+    })
+    if ($markerLines.Count -ne 1) { throw 'Driver safety inventory returned a missing or ambiguous result. Driver unchanged.' }
+
+    $encodedJson = $markerLines[0].Substring($markerPrefix.Length)
+    if ($encodedJson -notmatch '^[A-Za-z0-9+/]+={0,2}$') { throw 'Driver safety inventory returned malformed data. Driver unchanged.' }
+
+    try {
+        $json = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encodedJson))
+        $inventory = ConvertFrom-Json -InputObject $json -ErrorAction Stop
+    } catch {
+        throw "Driver safety inventory returned invalid data. Driver unchanged. $($_.Exception.Message)"
+    }
+
+    $packagesProperty = $inventory.PSObject.Properties['Packages']
+    $devicesProperty = $inventory.PSObject.Properties['Devices']
+    if ($null -eq $packagesProperty -or $null -eq $devicesProperty) {
+        throw 'Driver safety inventory returned an incomplete result. Driver unchanged.'
+    }
+
+    return [pscustomobject]@{
+        Packages = @($packagesProperty.Value)
+        Devices  = @($devicesProperty.Value)
+    }
+}
+
+function Get-DriverInstallSafetyInventory {
+    param(
+        [Parameter(Mandatory = $true)][string]$InfName,
+        [Parameter(Mandatory = $true)][string]$HardwareId,
+        [int]$TimeoutSeconds = 15
+    )
+
+    $requestJson = ConvertTo-Json -InputObject ([pscustomobject]@{ InfName = $InfName; HardwareId = $HardwareId }) -Compress
+    $requestBase64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($requestJson))
+    $queryScript = @'
+$ErrorActionPreference = 'Stop'
+try {
+    $requestJson = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('__REQUEST__'))
+    $request = ConvertFrom-Json -InputObject $requestJson -ErrorAction Stop
+    $packages = @(Get-WindowsDriver -Online -All -ErrorAction Stop | Where-Object {
+        [IO.Path]::GetFileName([string]$_.OriginalFileName) -ieq [string]$request.InfName
+    } | ForEach-Object {
+        [pscustomobject]@{ OriginalFileName = [string]$_.OriginalFileName; Driver = [string]$_.Driver }
+    })
+    $devices = @(Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop | Where-Object {
+        ([string]$_.DeviceID).StartsWith([string]$request.HardwareId, [StringComparison]::OrdinalIgnoreCase) -or
+        ([string]$_.HardwareID).Equals([string]$request.HardwareId, [StringComparison]::OrdinalIgnoreCase)
+    } | ForEach-Object {
+        [pscustomobject]@{ DeviceID = [string]$_.DeviceID; HardwareID = [string]$_.HardwareID; DriverVersion = [string]$_.DriverVersion }
+    })
+    $inventory = [pscustomobject]@{ Packages = @($packages); Devices = @($devices) }
+    $json = ConvertTo-Json -InputObject $inventory -Compress -Depth 5
+    $encodedJson = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($json))
+    [Console]::Out.WriteLine('DRIVER_INSTALL_SAFETY_INVENTORY:' + $encodedJson)
+    exit 0
+} catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+}
+'@
+    $queryScript = $queryScript.Replace('__REQUEST__', $requestBase64)
+
+    $output = Invoke-DriverInstallSafetyQuery -ScriptText $queryScript -TimeoutSeconds $TimeoutSeconds
+    return ConvertFrom-DriverInstallSafetyInventoryResult -OutputText $output
+}
+
 function Test-SafeDriverInstall {
     param(
         [Parameter(Mandatory = $true)][string]$InfPath,
@@ -104,13 +186,9 @@ function Test-SafeDriverInstall {
     $infName = [IO.Path]::GetFileName($InfPath)
     # Both queries must succeed. An empty successful query means missing;
     # errors, missing active versions, and unreadable store INFs mean unknown.
-    $packages = @(Get-WindowsDriver -Online -All -ErrorAction Stop | Where-Object {
-        [IO.Path]::GetFileName([string]$_.OriginalFileName) -ieq $infName
-    })
-    $devices = @(Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop | Where-Object {
-        ([string]$_.DeviceID).StartsWith($HardwareId, [StringComparison]::OrdinalIgnoreCase) -or
-        ([string]$_.HardwareID).Equals($HardwareId, [StringComparison]::OrdinalIgnoreCase)
-    })
+    $inventory = Get-DriverInstallSafetyInventory -InfName $infName -HardwareId $HardwareId
+    $packages = @($inventory.Packages)
+    $devices = @($inventory.Devices)
     $installed = @()
     foreach ($device in $devices) {
         # CIM reports the active INF's numeric DriverVersion (not DriverDate).
@@ -275,10 +353,14 @@ function Assert-ExpectedDisplayPackage {
         [IO.Path]::GetFileName($DriverPath) -ine $expectedDll -or
         [IO.Path]::GetFileName($CatalogPath) -ine $expectedCat) { throw 'Display package filenames do not match the hardware identity.' }
     $inf = (Get-Content -LiteralPath $InfPath -ErrorAction Stop | ForEach-Object { ($_ -split ';',2)[0] }) -join "`n"
-    if ($inf -notmatch '(?im)^\s*Class\s*=\s*Display\s*$' -or
-        $inf -notmatch '(?im)^\s*ClassGuid\s*=\s*\{4d36e968-e325-11ce-bfc1-08002be10318\}\s*$' -or
-        $inf -notmatch ('(?im)^\s*CatalogFile\s*=\s*' + [regex]::Escape($expectedCat) + '\s*$') -or
-        $inf -notmatch ('(?im)^\s*%[^%]+%\s*=\s*[^,\r\n]+,\s*' + [regex]::Escape($HardwareId) + '\s*$')) {
+    # INF identifiers follow Windows package syntax, independent of user locale.
+    $infMatchOptions = [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+                       [Text.RegularExpressions.RegexOptions]::Multiline -bor
+                       [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    if (-not [regex]::IsMatch($inf, '^\s*Class\s*=\s*Display\s*$', $infMatchOptions) -or
+        -not [regex]::IsMatch($inf, '^\s*ClassGuid\s*=\s*\{4d36e968-e325-11ce-bfc1-08002be10318\}\s*$', $infMatchOptions) -or
+        -not [regex]::IsMatch($inf, ('^\s*CatalogFile\s*=\s*' + [regex]::Escape($expectedCat) + '\s*$'), $infMatchOptions) -or
+        -not [regex]::IsMatch($inf, ('^\s*%[^%]+%\s*=\s*[^,\r\n]+,\s*' + [regex]::Escape($HardwareId) + '\s*$'), $infMatchOptions)) {
         throw 'Display INF class, catalog or hardware identity mismatch.'
     }
     Initialize-DisplayPackageValidation
@@ -484,6 +566,7 @@ function Invoke-DriverProcessCapture {
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             try {
                 $process.Kill()
+                $process.WaitForExit(5000) | Out-Null
             } catch {
                 $null = $_
             }
@@ -503,6 +586,37 @@ function Invoke-DriverProcessCapture {
         return @($output | ForEach-Object { [string]$_ })
     } finally {
         $process.Dispose()
+    }
+}
+
+function Invoke-DriverInstallSafetyCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptText,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $hostProcess = Get-Process -Id $PID -ErrorAction Stop
+    $powerShellPath = [string]$hostProcess.Path
+    if ([string]::IsNullOrWhiteSpace($powerShellPath)) { throw 'Unable to resolve the current PowerShell host. Driver unchanged.' }
+
+    # Keep module-autoload progress records out of the child output consumed by
+    # the inventory decoder. Errors, exit status, and timeout handling remain intact.
+    $childScriptText = "`$ProgressPreference = 'SilentlyContinue'`r`n$ScriptText"
+    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScriptText))
+    try {
+        $output = Invoke-DriverProcessCapture -FilePath $powerShellPath -ArgumentList @(
+            '-NoLogo', '-NonInteractive', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand
+        ) -AllowedExitCodes @(0) -TimeoutSeconds $TimeoutSeconds
+        return (@($output) -join [Environment]::NewLine)
+    } catch {
+        $detail = [string]$_.Exception.Message
+        if ($detail.Contains("timed out after $TimeoutSeconds seconds")) {
+            throw "Driver safety inventory timed out after $TimeoutSeconds seconds; driver unchanged."
+        }
+        if ($detail -match 'failed with exit code (\d+)') {
+            throw "Driver safety inventory failed with exit code $($Matches[1]); driver unchanged. $detail"
+        }
+        throw "Driver safety inventory failed; driver unchanged. $detail"
     }
 }
 
@@ -1164,9 +1278,12 @@ function Get-SunshineDriverPublishedNamesFromInfCache {
 
         # This fallback is intentionally strict: all three package-owned
         # identifiers must match before an OEM INF can be selected for removal.
-        $matchesClass = $content -match '(?im)^\s*ClassGuid\s*=\s*\{4d36e968-e325-11ce-bfc1-08002be10318\}\s*$'
-        $matchesCatalog = $content -match '(?im)^\s*CatalogFile(?:\.[^=]+)?\s*=\s*SunshineVirtualDisplayDriver\.cat\s*$'
-        $matchesHardware = $content -match '(?im)^\s*[^;\r\n]+\s*=\s*[^,\r\n]+,\s*Root\\SunshineVirtualDisplay\s*$'
+        $infMatchOptions = [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+                           [Text.RegularExpressions.RegexOptions]::Multiline -bor
+                           [Text.RegularExpressions.RegexOptions]::CultureInvariant
+        $matchesClass = [regex]::IsMatch($content, '^\s*ClassGuid\s*=\s*\{4d36e968-e325-11ce-bfc1-08002be10318\}\s*$', $infMatchOptions)
+        $matchesCatalog = [regex]::IsMatch($content, '^\s*CatalogFile(?:\.[^=]+)?\s*=\s*SunshineVirtualDisplayDriver\.cat\s*$', $infMatchOptions)
+        $matchesHardware = [regex]::IsMatch($content, '^\s*[^;\r\n]+\s*=\s*[^,\r\n]+,\s*Root\\SunshineVirtualDisplay\s*$', $infMatchOptions)
         if ($matchesClass -and $matchesCatalog -and $matchesHardware) {
             $publishedName = $publishedInf.Name.ToLowerInvariant()
             if ($publishedName -match '^oem[0-9]+\.inf$' -and -not $publishedNames.Contains($publishedName)) {

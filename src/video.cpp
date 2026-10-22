@@ -36,6 +36,7 @@ extern "C" {
 
 // local includes
 #include "cbs.h"
+#include "capture_recovery.h"
 #include "config.h"
 #include "display_device.h"
 #include "amf/amf_encoder.h"
@@ -43,6 +44,7 @@ extern "C" {
 #include "globals.h"
 #include "input.h"
 #include "input_boost_policy.h"
+#include "input_geometry_policy.h"
 #include "logging.h"
 #include "nvenc/nvenc_base.h"
 #include "platform/common.h"
@@ -50,6 +52,7 @@ extern "C" {
 #include "pyrowave_host.h"
 #include "sync.h"
 #include "video.h"
+#include "video_framerate_policy.h"
 #include "video_encoder_probe_policy.h"
 #include "video_fec.h"
 #include "video_policy.h"
@@ -106,6 +109,25 @@ namespace video {
   }
 
   namespace {
+#ifdef _WIN32
+    void observe_recovery_capture_frame(const std::string &output, std::uint64_t instance) {
+      // A capture name is mutable: resolve it against the current Windows
+      // device list and let the observer accept only the exact leased ID.
+      capture_recovery::observe_frame_from_current_device_list(
+        capture_recovery::observations(),
+        output,
+        instance,
+        [] {
+          return display_helper_integration::enumerate_devices(
+            display_device::DeviceEnumerationDetail::Minimal
+          );
+        },
+        [](const auto &device) -> const std::string & { return device.m_display_name; },
+        [](const auto &device) -> const std::string & { return device.m_device_id; }
+      );
+    }
+#endif
+
     // Serializes destruction of encode sessions (and, on Windows, the async release of shared
     // D3D capture surfaces). When two clients share one capture target, a capture reinit makes
     // both video threads tear down their NVENC session + D3D11 device at the same instant. Both
@@ -1285,14 +1307,33 @@ namespace video {
         return {};
       }
 
+      if (output_identity_failed) {
+        return {};
+      }
+
       auto result = device->nvenc->encode_frame(frame_index, force_idr);
       force_idr = false;
+      if (!result.data.empty() && result.frame_index != frame_index) {
+        // Native NVENC has one synchronous input/output transaction. Delivering
+        // another index would attribute this picture's timestamps to other pixels.
+        // Keep this failure latched until the client stream ends; rebuilding the
+        // encoder alone does not establish a decoder reset or picture continuity.
+        BOOST_LOG(error) << "NvEnc: refusing output with frame index " << result.frame_index
+                         << " for submitted frame " << frame_index;
+        output_identity_failed = true;
+        return {};
+      }
       return result;
+    }
+
+    bool has_output_identity_failure() const {
+      return output_identity_failed;
     }
 
   private:
     std::unique_ptr<platf::nvenc_encode_device_t> device;
     bool force_idr = false;
+    bool output_identity_failed = false;
   };
 
   class amf_encode_session_t: public encode_session_t {
@@ -1575,7 +1616,14 @@ namespace video {
   struct capture_ctx_t {
     img_event_t images;
     config_t config;
+    safe::mail_raw_t::event_t<input::touch_port_t> touch_port_events;
   };
+
+  void raise_touch_port_if_geometry_changed(
+    const safe::mail_raw_t::event_t<input::touch_port_t> &event,
+    platf::display_t *display,
+    const config_t &config
+  );
 
 #ifdef _WIN32
   SS_HDR_METADATA synthetic_probe_hdr_metadata() {
@@ -2862,6 +2910,7 @@ namespace video {
       disp.reset();
       disp = platf::display(type, display_name, config, required_adapter);
       if (disp) {
+        disp->recovery_capture_instance = capture_recovery::observations().begin_capture();
         break;
       }
 
@@ -3114,6 +3163,7 @@ namespace video {
         return;
       }
 
+      if (capture_config.capture_target_valid && !capture_config.capture_target_valid()) return;
       const auto exact_output = capture_config.capture_source == capture_source_e::exact_output;
       const auto required_output = exact_output ? capture_config.capture_output : std::nullopt;
       const bool log_display_retry = policy::should_log_display_retry(display_retry_failures);
@@ -3149,6 +3199,7 @@ namespace video {
       }
       disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_config);
       if (disp) {
+        disp->recovery_capture_instance = capture_recovery::observations().begin_capture();
         break;
       }
 
@@ -3324,6 +3375,11 @@ namespace video {
       const bool event_driven_capture = disp->is_event_driven_capture();
 
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
+#ifdef _WIN32
+        if (frame_captured && img && display_p >= 0 && static_cast<std::size_t>(display_p) < display_names.size()) {
+          observe_recovery_capture_frame(display_names[display_p], disp->recovery_capture_instance);
+        }
+#endif
         if (event_driven_capture) {
           bool new_context_needs_frame = false;
           while (auto pending_context = capture_ctx_queue->pop(0ms)) {
@@ -3397,10 +3453,23 @@ namespace video {
         artificial_reinit = false;
       }
 
+      // Close the async session admission gate only for a reinit before draining
+      // the queue. Every capture return still publishes terminal geometry to
+      // already-admitted contexts, without changing non-reinit encoder teardown.
+      input::geometry::terminalize_capture_contexts(
+        reinit_event,
+        *capture_ctx_queue,
+        capture_ctxs,
+        status == platf::capture_e::reinit,
+        [](const auto &capture_ctx) { return capture_ctx.images->running(); },
+        [&](auto &capture_ctx) {
+          raise_touch_port_if_geometry_changed(capture_ctx.touch_port_events, disp.get(), capture_ctx.config);
+        }
+      );
+
       switch (status) {
         case platf::capture_e::reinit:
           {
-            reinit_event.raise(true);
             disp->prepare_for_reinit();
 
             // Some classes of images contain references to the display --> display won't delete unless img is deleted.
@@ -3471,6 +3540,15 @@ namespace video {
             }
 #endif
 
+            // Metadata was observed by this exact capture instance. Let it
+            // advance that observation only after every old encoder released
+            // its display reference, then republish it for encoder selection.
+            if (disp->commit_pending_capture_metadata()) {
+              display_wp = disp;
+              reinit_event.reset();
+              continue;
+            }
+
             while (auto pending_context = capture_ctx_queue->pop(0ms)) {
               if (pending_context->images->running()) {
                 capture_ctxs.emplace_back(std::move(*pending_context));
@@ -3489,6 +3567,7 @@ namespace video {
               disp.reset();
 
               // Refresh display names since a display removal might have caused the reinitialization
+              if (capture_ctxs.front().config.capture_target_valid && !capture_ctxs.front().config.capture_target_valid()) return;
               const auto exact_output = capture_ctxs.front().config.capture_source == capture_source_e::exact_output;
               const auto required_output = exact_output ? capture_ctxs.front().config.capture_output : std::nullopt;
               refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, proc::proc.display_name, required_output, exact_output, policy::should_log_display_retry(display_retry_failures));
@@ -3651,10 +3730,6 @@ namespace video {
     if (encoded_frame.data.empty()) {
       BOOST_LOG(error) << "NvENC returned empty packet";
       return -1;
-    }
-
-    if (frame_nr != encoded_frame.frame_index) {
-      BOOST_LOG(error) << "NvENC frame index mismatch " << frame_nr << " " << encoded_frame.frame_index;
     }
 
     auto packet = std::make_unique<packet_raw_generic>(std::move(encoded_frame.data), encoded_frame.frame_index, encoded_frame.idr);
@@ -4989,6 +5064,7 @@ namespace video {
 
   enum class encode_run_result_e {
     completed,
+    native_nvenc_identity_failed,
     native_amf_failed,
     temporarily_busy,
     initialization_failed,
@@ -5012,6 +5088,10 @@ namespace video {
     rtx_hdr_metadata_refresh_state_t &rtx_hdr_metadata_refresh
   ) {
     const encoder_t *session_encoder = &encoder;
+    const int effective_encoding_framerate_milli_fps = framerate_policy::effective_encoding_framerate_milli_fps(
+      config.encodingFramerate,
+      config.framerate
+    );
     bool initialization_was_cancelled = false;
     bool initialization_gate_contended = false;
     auto session = prepared_session ?
@@ -5020,6 +5100,17 @@ namespace video {
                        disp.get(), encoder, config, disp->width, disp->height,
                        std::move(encode_device), initialization_deadline, initialization_cancelled,
                        &initialization_was_cancelled, &initialization_gate_contended);
+#if defined(__linux__)
+    BOOST_LOG(info) << "Linux encoder dimensions: encoder=" << encoder.name
+                    << " capture=" << disp->width << 'x' << disp->height
+                    << " encoder_context=" << config.width << 'x' << config.height
+                    << " stream_fps=" << config.framerate
+                    << " requested_encoding_framerate_milli_fps=" << config.encodingFramerate
+                    << " effective_encoding_framerate_milli_fps=" << effective_encoding_framerate_milli_fps
+                    << " result=" << (session ? "ready" : initialization_gate_contended ? "temporarily_busy" :
+                                                                                          "failed")
+                    << '.';
+#endif
 #ifdef _WIN32
     if (initialization_was_cancelled) return encode_run_result_e::completed;
     if (!session && &encoder == &amdvce_experimental) {
@@ -5048,6 +5139,7 @@ namespace video {
     const auto session_encoder_flags = session_encoder->flags;
 
     auto shutdown_event = mail->event<bool>(mail::shutdown);
+    auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
 
     bool force_sync_teardown = false;
 
@@ -5230,7 +5322,7 @@ namespace video {
     };
 
     if (config.encodingFramerate <= 0) {
-      const int fallback_fps = config.framerate > 0 ? config.framerate * 1000 : 60000;
+      const int fallback_fps = effective_encoding_framerate_milli_fps;
       BOOST_LOG(warning) << "Encoding framerate missing; falling back to " << fallback_fps;
       config.encodingFramerate = fallback_fps;
     }
@@ -5403,6 +5495,7 @@ namespace video {
 
     while (true) {
       consume_input_activity();
+      raise_touch_port_if_geometry_changed(touch_port_event, disp.get(), config);
 
       if (auto now = std::chrono::steady_clock::now(); now - loop_stats.last_log >= 10s) {
         BOOST_LOG(debug) << "Encode loop [" << channel_data << "] " << config.width << 'x' << config.height
@@ -5548,6 +5641,7 @@ namespace video {
         }
 
         auto img = images->pop(image_wait_budget);
+        raise_touch_port_if_geometry_changed(touch_port_event, disp.get(), config);
         // Completion can race the pre-wait drain, including when capture and
         // output become ready together. Send the older packet before acquiring
         // the next image's GPU mutex or reserving/converting its input surface.
@@ -5658,6 +5752,13 @@ namespace video {
       // This is useful for KVM switch scenarios where mouse may disappear during streaming
       platf::enable_mouse_keys();
     }
+    if (auto *native_session = dynamic_cast<nvenc_encode_session_t *>(session.get());
+        native_session && native_session->has_output_identity_failure()) {
+      // Signal stream termination before driver teardown can block this thread.
+      shutdown_event->raise(true);
+      force_sync_teardown = true;
+      return encode_run_result_e::native_nvenc_identity_failed;
+    }
     if (native_amf_runtime_failed) {
       force_sync_teardown = true;
     }
@@ -5694,7 +5795,7 @@ namespace video {
     auto offsetX = (config.width - w2) * 0.5f;
     auto offsetY = (config.height - h2) * 0.5f;
 
-    return input::touch_port_t {
+    input::touch_port_t result {
       {
         display->offset_x,
         display->offset_y,
@@ -5713,6 +5814,26 @@ namespace video {
       display_env_logical_width,
       display_env_logical_height
     };
+
+    if (auto geometry = display->input_geometry_snapshot()) {
+      input::geometry::apply_snapshot_to_port(result, *geometry);
+    }
+    return result;
+  }
+
+  void publish_touch_port(
+    const safe::mail_raw_t::event_t<input::touch_port_t> &event,
+    input::touch_port_t port
+  ) {
+    input::geometry::publish_monotonic_port(event, std::move(port));
+  }
+
+  void raise_touch_port_if_geometry_changed(
+    const safe::mail_raw_t::event_t<input::touch_port_t> &event,
+    platf::display_t *display,
+    const config_t &config
+  ) {
+    input::geometry::publish_port_if_geometry_changed(event, make_port(display, config));
   }
 
   std::unique_ptr<platf::encode_device_t> make_encode_device(
@@ -5858,7 +5979,7 @@ namespace video {
     if (!encode_device && !session) return std::nullopt;
 
     // absolute mouse coordinates require that the dimensions of the screen are known
-    ctx.touch_port_events->raise(make_port(disp.get(), ctx.config));
+    publish_touch_port(ctx.touch_port_events, make_port(disp.get(), ctx.config));
 
     if (!session) {
       session = make_encode_session(
@@ -5949,6 +6070,7 @@ namespace video {
         return encode_e::ok;
       }
       // Refresh display names since a display removal might have caused the reinitialization
+      if (synced_session_ctxs.front()->config.capture_target_valid && !synced_session_ctxs.front()->config.capture_target_valid()) return encode_e::error;
       const auto exact_output = synced_session_ctxs.front()->config.capture_source == capture_source_e::exact_output;
       const auto required_output = exact_output ? synced_session_ctxs.front()->config.capture_output : std::nullopt;
       refresh_displays(encoder.platform_formats->dev_type, display_names, display_p, required_output, exact_output, policy::should_log_display_retry(display_retry_failures));
@@ -6011,6 +6133,11 @@ namespace video {
     auto ec = platf::capture_e::ok;
     while (encode_session_ctx_queue.running()) {
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
+#ifdef _WIN32
+        if (frame_captured && img && display_p >= 0 && static_cast<std::size_t>(display_p) < display_names.size()) {
+          observe_recovery_capture_frame(display_names[display_p], disp->recovery_capture_instance);
+        }
+#endif
         if (frame_captured && !img) {
           BOOST_LOG(error) << "Capture backend reported a frame without an image"sv;
           ec = platf::capture_e::error;
@@ -6039,6 +6166,7 @@ namespace video {
 
         KITTY_WHILE_LOOP(auto pos = std::begin(synced_sessions), pos != std::end(synced_sessions), {
           auto ctx = pos->ctx;
+          raise_touch_port_if_geometry_changed(ctx->touch_port_events, disp.get(), ctx->config);
           if (ctx->shutdown_event->peek()) {
             // Let waiting thread know it can delete shutdown_event
             ctx->join_event->raise(true);
@@ -6182,6 +6310,25 @@ namespace video {
       };
 
       auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &display_cursor);
+      // capture() terminalizes this display's geometry before returning. Make
+      // the terminal mapping visible to every active synchronous session before
+      // tearing down their encoder state or returning to the caller.
+      for (auto &ctx : synced_session_ctxs) {
+        raise_touch_port_if_geometry_changed(ctx->touch_port_events, disp.get(), ctx->config);
+      }
+      if (status == platf::capture_e::reinit && ec == platf::capture_e::ok) {
+        // Synchronous encoders share this thread, so destroying their sessions
+        // is the equivalent of the async worker's display-reference barrier.
+        synced_sessions.clear();
+        if (disp->commit_pending_capture_metadata()) {
+          for (auto &ctx : synced_session_ctxs) {
+            auto session = make_synced_session(disp, encoder, *img, *ctx);
+            if (!session) return encode_e::error;
+            synced_sessions.emplace_back(std::move(*session));
+          }
+          continue;
+        }
+      }
       switch (status) {
         case platf::capture_e::reinit:
         case platf::capture_e::error:
@@ -6331,6 +6478,7 @@ namespace video {
     const std::chrono::duration<double, std::milli> max_frametime {1000.0 / minimum_fps_target};
 
     auto shutdown_event = mail->event<bool>(mail::shutdown);
+    auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
     auto idr_events = mail->event<bool>(mail::idr);
     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
@@ -6348,6 +6496,7 @@ namespace video {
     std::size_t critical_bytes = 0;
     pyrowave::policy::detail_fec_controller_t detail_fec_controller(config.framerate);
     while (true) {
+      raise_touch_port_if_geometry_changed(touch_port_event, disp.get(), config);
       // Capture can change before the first encoded packet too.
       const bool reinit_pending = reinit_event.peek();
       if (shutdown_event->peek() || !images->running() || reinit_pending) {
@@ -6380,6 +6529,7 @@ namespace video {
       } else if (!images->running()) {
         return false;
       }
+      raise_touch_port_if_geometry_changed(touch_port_event, disp.get(), config);
 
       const auto submitted_at = std::chrono::steady_clock::now();
       encoder->on_frame(submitted_at);
@@ -6424,6 +6574,7 @@ namespace video {
     void *channel_data
   ) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
+    auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
 
     auto images = std::make_shared<img_event_t::element_type>();
     // DXGI allows only one duplication per process/output. Normal mirror
@@ -6444,7 +6595,7 @@ namespace video {
       shutdown_event->raise(true);
     });
 
-    if (!source_ctx.capture_ctx_queue->try_raise(capture_ctx_t {images, config})) {
+    if (!source_ctx.capture_ctx_queue->try_raise(capture_ctx_t {images, config, touch_port_event})) {
       BOOST_LOG(error) << "Shared capture session queue is full or stopped; rejecting the session."sv;
       return;
     }
@@ -6459,7 +6610,6 @@ namespace video {
     std::optional<hdr_info_raw_t> last_hdr_info;
     rtx_hdr_metadata_refresh_state_t rtx_hdr_metadata_refresh;
 
-    auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
 #if defined(_WIN32) || (defined(__linux__) && defined(SUNSHINE_BUILD_CUDA))
     int consecutive_encoder_initialization_failures = 0;
@@ -6497,7 +6647,7 @@ namespace video {
         const auto colorspace = pyrowave_session_colorspace(*display, config, hdr_info);
 
         // absolute mouse coordinates require that the dimensions of the screen are known
-        touch_port_event->raise(make_port(display.get(), config));
+        publish_touch_port(touch_port_event, make_port(display.get(), config));
         if (!encode_run_pyrowave(frame_nr, mail, images, config, display, colorspace, source_ctx.reinit_event, channel_data, std::move(hdr_info), last_hdr_info)) {
           // Shutdown, or an encoder failure: end the session either way.
           return;
@@ -6628,7 +6778,7 @@ namespace video {
       auto &session_encoder = *enc_ptr;
 
       // absolute mouse coordinates require that the dimensions of the screen are known
-      touch_port_event->raise(make_port(display.get(), config));
+      publish_touch_port(touch_port_event, make_port(display.get(), config));
 
       hdr_info_t pending_hdr_info = std::make_unique<hdr_info_raw_t>(false);
       if (session_hdr_metadata_valid) pending_hdr_info = std::make_unique<hdr_info_raw_t>(true, session_hdr_metadata);
@@ -6649,6 +6799,12 @@ namespace video {
         last_hdr_info,
         rtx_hdr_metadata_refresh
       );
+      if (encode_result == encode_run_result_e::native_nvenc_identity_failed) {
+        // No replacement encoder may resume this client decoder after identity
+        // was lost. The capture scope's guard stops images and signals shutdown.
+        BOOST_LOG(error) << "NvEnc: ending stream after output picture identity failure"sv;
+        return;
+      }
 #ifdef _WIN32
       if (encode_result == encode_run_result_e::native_amf_failed && &session_encoder == &amdvce_experimental) {
         // Runtime fatals (TDR, sustained backpressure, output stalls) are

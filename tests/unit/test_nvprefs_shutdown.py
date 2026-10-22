@@ -48,6 +48,9 @@ returns = "\n".join(
 
 program = r'''
 #include <cassert>
+// Cleanup records its shutdown phase, which main() owns.
+#include "src/shutdown_phase.h"
+shutdown_phase::tracker_t shutdown_phase_state;
 #include <stdexcept>
 #include <string>
 #include <map>
@@ -152,7 +155,7 @@ with tempfile.TemporaryDirectory(prefix="nvprefs-shutdown-") as directory:
     (path / "test.cpp").write_text(program)
     executable = path / "test"
     subprocess.run(
-        [compiler, "-std=c++23", "-Wall", "-Wextra", "-Werror", str(path / "test.cpp"), "-o", str(executable)],
+        [compiler, "-std=c++23", "-Wall", "-Wextra", "-Werror", "-I", str(root), str(path / "test.cpp"), "-o", str(executable)],
         check=True,
     )
     subprocess.run([str(executable)], check=True)

@@ -18,6 +18,7 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <functional>
 #include <string>
 
 extern "C" {
@@ -79,6 +80,9 @@ namespace video {
     // Input-only sessions use an in-memory black producer without desktop capture.
     capture_source_e capture_source {capture_source_e::active_output};
     std::optional<std::string> capture_output;
+    // Recheck the exact platform binding before each native capture open/reopen.
+    // This callback also retains the target through the producer/GPU lifetime.
+    std::function<bool()> capture_target_valid;
     // Opt into the smallest supported host-side queues for a launch-qualified VRR
     // session. This remains false for clients that do not negotiate the mode.
     bool vrr_low_latency = false;

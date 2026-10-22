@@ -67,9 +67,23 @@ int main(int argc, char **argv) {
   std::vector<std::thread> requests;
   for (auto &peer : peers) requests.emplace_back([&peer] { peer = platf::display_power::acquire(); });
   for (auto &request : requests) request.join();
-  for (const auto &peer : peers) g_assert_true(peer == first);
+  // Display-target mutations are exclusive: a peer that races another thread's acquisition is
+  // refused before it spawns anything. Every admitted peer joins the one existing lease.
+  unsigned admitted = 0;
+  for (const auto &peer : peers) {
+    g_assert_true(!peer || peer == first);
+    admitted += peer != nullptr;
+  }
+  g_assert_cmpuint(admitted, >=, 1);
   g_assert_cmpuint(power_spawns, ==, 1);
-  g_assert_cmpuint(wake_spawns, ==, 9);
+  g_assert_cmpuint(wake_spawns, ==, 1 + admitted);
+  // Without contention every request is admitted to that same lease.
+  for (auto &peer : peers) {
+    peer = platf::display_power::acquire();
+    g_assert_true(peer == first);
+  }
+  g_assert_cmpuint(power_spawns, ==, 1);
+  g_assert_cmpuint(wake_spawns, ==, 1 + admitted + peers.size());
   first.reset();
   peers.clear();
   g_assert_true(std::static_pointer_cast<platf::display_power::lease_t>(second)->alive());

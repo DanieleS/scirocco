@@ -117,6 +117,14 @@ bool matches_virtual_display_id_edid(
 ) {
   return device.display_id == display_id;
 }
+// Production also matches the monitor ContainerID from the Windows device path; these
+// fake devices carry their identity in display_id alone.
+bool matches_virtual_display_id_identity(
+  const display_device::EnumeratedDevice &device,
+  std::uint64_t display_id
+) {
+  return matches_virtual_display_id_edid(device, display_id);
+}
 
 namespace VDISPLAY_SUNSHINE {
 '''

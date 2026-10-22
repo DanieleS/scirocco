@@ -12,10 +12,12 @@
 // standard includes
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <thread>
@@ -174,6 +176,10 @@ namespace platf::dxgi {
      * @return `true` if connected, `false` otherwise.
      */
     virtual bool is_connected() = 0;
+
+    // Capability admission requires the actual connected kernel pipe peer.
+    // Older/custom transports fail closed instead of trusting payload PIDs.
+    virtual std::optional<DWORD> peer_process_id() { return std::nullopt; }
   };
 
   class FramedPipe: public INamedPipe {
@@ -188,6 +194,7 @@ namespace platf::dxgi {
     void wait_for_client_connection(int milliseconds) override;
     void disconnect() override;
     bool is_connected() override;
+    std::optional<DWORD> peer_process_id() override;
 
   private:
     bool try_decode_one_frame(std::span<uint8_t> dst, size_t &bytesRead);
@@ -245,6 +252,7 @@ namespace platf::dxgi {
      * @return `true` if connected, `false` otherwise.
      */
     bool is_connected() const;
+    std::optional<DWORD> peer_process_id() const;
 
   private:
     /**
@@ -338,6 +346,7 @@ namespace platf::dxgi {
      * @return `true` if connected, `false` otherwise.
      */
     bool is_connected() override;
+    std::optional<DWORD> peer_process_id() override;
 
     /**
      * @brief Flushes the message queue and retrieves the latest message from the pipe.
@@ -484,6 +493,13 @@ namespace platf::dxgi {
      */
     std::unique_ptr<INamedPipe> create_client(const std::string &pipe_name) override;
 
+    // All client connection/handshake waits share the caller's absolute deadline.
+    std::unique_ptr<INamedPipe> create_client(
+      const std::string &pipe_name,
+      const std::function<bool()> &cancelled,
+      std::chrono::steady_clock::time_point operation_deadline
+    );
+
     /**
      * @brief Creates a server named pipe.
      * @param pipe_name The name of the pipe to create.
@@ -546,7 +562,11 @@ namespace platf::dxgi {
      * @param fullPipeName The full name of the pipe.
      * @return safe handle to the created client pipe.
      */
-    winrt::file_handle create_client_pipe(const std::wstring &fullPipeName) const;
+    winrt::file_handle create_client_pipe(
+      const std::wstring &fullPipeName,
+      const std::function<bool()> &cancelled,
+      std::chrono::steady_clock::time_point operation_deadline
+    ) const;
 
     DWORD _client_security_flags = 0;
     SecurityDescriptorBuilder _secdesc_builder;  // optional custom SD builder (Playnite can override)
@@ -588,19 +608,44 @@ namespace platf::dxgi {
      */
     std::unique_ptr<INamedPipe> create_client(const std::string &pipe_name) override;
 
+    // All client connection/handshake waits share the caller's absolute deadline.
+    std::unique_ptr<INamedPipe> create_client(
+      const std::string &pipe_name,
+      const std::function<bool()> &cancelled,
+      std::chrono::steady_clock::time_point operation_deadline
+    );
+
     // Forward a custom SD builder into the underlying NamedPipeFactory
     void set_security_descriptor_builder(NamedPipeFactory::SecurityDescriptorBuilder builder);
     void set_client_identification_only();
 
   private:
     std::unique_ptr<INamedPipe> handshake_server(std::unique_ptr<INamedPipe> pipe);
-    std::unique_ptr<INamedPipe> handshake_client(std::unique_ptr<INamedPipe> pipe);
+    std::unique_ptr<INamedPipe> handshake_client(
+      std::unique_ptr<INamedPipe> pipe,
+      const std::function<bool()> &cancelled,
+      std::chrono::steady_clock::time_point operation_deadline
+    );
 
     bool send_handshake_message(std::unique_ptr<INamedPipe> &pipe, const std::string &pipe_name) const;
     HandshakeAckResult wait_for_handshake_ack(std::unique_ptr<INamedPipe> &pipe, std::vector<uint8_t> &buffered) const;
-    HandshakeMessageResult receive_handshake_message(std::unique_ptr<INamedPipe> &pipe, AnonConnectMsg &msg, std::vector<uint8_t> &prefetched) const;
-    bool send_handshake_ack(std::unique_ptr<INamedPipe> &pipe) const;
-    std::unique_ptr<INamedPipe> connect_to_data_pipe(const std::string &pipeNameStr);
+    HandshakeMessageResult receive_handshake_message(
+      std::unique_ptr<INamedPipe> &pipe,
+      AnonConnectMsg &msg,
+      std::vector<uint8_t> &prefetched,
+      const std::function<bool()> &cancelled,
+      std::chrono::steady_clock::time_point operation_deadline
+    ) const;
+    bool send_handshake_ack(
+      std::unique_ptr<INamedPipe> &pipe,
+      const std::function<bool()> &cancelled,
+      std::chrono::steady_clock::time_point operation_deadline
+    ) const;
+    std::unique_ptr<INamedPipe> connect_to_data_pipe(
+      const std::string &pipeNameStr,
+      const std::function<bool()> &cancelled,
+      std::chrono::steady_clock::time_point operation_deadline
+    );
 
     NamedPipeFactory _pipe_factory;
   };
@@ -619,6 +664,7 @@ namespace platf::dxgi {
     void wait_for_client_connection(int milliseconds) override;
     void disconnect() override;
     bool is_connected() override;
+    std::optional<DWORD> peer_process_id() override;
 
   private:
     /// Return a stable transport snapshot without reconnecting. Connection

@@ -37,6 +37,7 @@
 #include "amf/amf_config_policy.h"
 #include "amf/amf_lifecycle.h"
 #include "config.h"
+#include "control_peer_timeout.h"
 #include "virtual_display_scale.h"
 #include "config_key.h"
 #include "config_playnite.h"
@@ -113,6 +114,7 @@ namespace VDISPLAY {
 
 namespace config {
   namespace {
+    void update_base_session_input_config_snapshot(const std::unordered_map<std::string, std::string> &vars);
     void update_base_adapter_config_snapshot(
       const std::unordered_map<std::string, std::string> &vars
     );
@@ -947,6 +949,7 @@ namespace config {
       video_t::dd_t::hdr_option_e::automatic,  // hdr_option
       video_t::dd_t::hdr_request_override_e::automatic,  // hdr_request_override
       3s,  // config_revert_delay
+      false,  // remove_virtual_display_after_restore (retain stable identities by default)
       {},  // config_revert_on_disconnect
       7200,  // paused_virtual_display_timeout_secs (2 hours)
       true,  // always_restore_from_golden (uses session fallback until a golden snapshot exists)
@@ -957,6 +960,8 @@ namespace config {
 #else
       0,  // snapshot_restore_hotkey_modifiers
 #endif
+      0,  // end_stream_hotkey (disabled by default)
+      0x7,  // end_stream_hotkey_modifiers (ctrl+alt+shift)
       true,  // use_sunshine_virtual_display_driver
       false,  // activate_virtual_display
       0,  // virtual_display_scale_percent
@@ -997,6 +1002,7 @@ namespace config {
 
     20,  // fecPercentage
     64,  // video_max_batch_size_kb
+    false,  // pacing_batch_demand_limit (experimental per-call demand-based sizing; default off)
     20,  // pyrowave_critical_fec_percentage
 
     ENCRYPTION_MODE_NEVER,  // lan_encryption_mode
@@ -1024,6 +1030,8 @@ namespace config {
       {0x11, 0xA2},
       {0x12, 0xA4},
     },
+    0,  // guide_button_key (disabled)
+    0,  // guide_button_controller (first controller of the sending client)
     -1ms,  // back_button_timeout
     500ms,  // key_repeat_delay
     std::chrono::duration<double> {1 / 24.9},  // key_repeat_period
@@ -1148,6 +1156,12 @@ namespace config {
   };
 
   namespace {
+    // Only completed applies publish this setting; the control thread never
+    // reads the mutable/reset-in-progress configuration objects.
+    std::atomic<std::uint32_t> g_control_peer_timeout_ms {0};
+
+    hardware_metrics_config_t g_hardware_metrics_config;
+
     const video_t default_video = video;
     const audio_t default_audio = audio;
     const stream_t default_stream = stream;
@@ -1189,6 +1203,14 @@ namespace config {
       sunshine.cmd = preserved_cmd;
     }
   }  // namespace
+
+  std::chrono::milliseconds get_control_peer_timeout() {
+    return std::chrono::milliseconds {g_control_peer_timeout_ms.load(std::memory_order_acquire)};
+  }
+
+  hardware_metrics_settings_t get_hardware_metrics_settings() {
+    return g_hardware_metrics_config.snapshot();
+  }
 
   bool endline(char ch) {
     return ch == '\r' || ch == '\n';
@@ -1759,6 +1781,7 @@ namespace config {
 
   void apply_config(std::unordered_map<std::string, std::string> &&vars) {
     reset_runtime_config_to_defaults();
+    std::chrono::milliseconds control_peer_timeout {0};
 #ifndef __ANDROID__
     // TODO: Android can possibly support this
     if (!fs::exists(stream.file_apps.c_str())) {
@@ -1988,6 +2011,7 @@ namespace config {
         video.dd.config_revert_delay = std::chrono::milliseconds {value};
       }
     }
+    bool_f(vars, "dd_remove_virtual_display_after_restore", video.dd.remove_virtual_display_after_restore);
     bool_f(vars, "dd_config_revert_on_disconnect", video.dd.config_revert_on_disconnect);
     {
       int value = 0;
@@ -2035,6 +2059,14 @@ namespace config {
       auto it = vars.find("dd_snapshot_restore_hotkey_modifiers");
       if (it != std::end(vars)) {
         video.dd.snapshot_restore_hotkey_modifiers = dd::snapshot_restore_hotkey_modifiers_from_view(it->second);
+        vars.erase(it);
+      }
+    }
+    generic_f(vars, "end_stream_hotkey", video.dd.end_stream_hotkey, dd::snapshot_restore_hotkey_from_view);
+    {
+      auto it = vars.find("end_stream_hotkey_modifiers");
+      if (it != std::end(vars)) {
+        video.dd.end_stream_hotkey_modifiers = dd::snapshot_restore_hotkey_modifiers_from_view(it->second);
         vars.erase(it);
       }
     }
@@ -2231,6 +2263,17 @@ namespace config {
       stream.ping_timeout = std::chrono::milliseconds(to);
     }
 
+    // Parse locally so reset/parse cannot expose a transient policy to CONNECT.
+    // Each completed apply uses default 0 for invalid or missing values.
+    generic_f(vars, "control_peer_timeout", control_peer_timeout, [&](std::string_view value) {
+      const auto timeout = parse_control_peer_timeout(value);
+      if (!timeout) {
+        BOOST_LOG(warning) << "Invalid control_peer_timeout: expected decimal milliseconds from 0 to "sv
+                           << max_control_peer_timeout.count();
+      }
+      return timeout.value_or(control_peer_timeout);
+    });
+
     int_between_f(vars, "lan_encryption_mode", stream.lan_encryption_mode, {0, 2});
     int_between_f(vars, "wan_encryption_mode", stream.wan_encryption_mode, {0, 2});
 
@@ -2253,6 +2296,7 @@ namespace config {
     vars.erase("pyrowave_send_rate_mbps");
     int_between_f(vars, "pyrowave_critical_fec_percentage", stream.pyrowave_critical_fec_percentage, {0, 255});
     int_between_f(vars, "video_max_batch_size_kb", stream.video_max_batch_size_kb, {0, 64});
+    bool_f(vars, "pacing_batch_demand_limit", stream.pacing_batch_demand_limit);
     if (stream.video_max_batch_size_kb == 0) {
       stream.video_max_batch_size_kb = 64;
     } else if (stream.video_max_batch_size_kb != 16 && stream.video_max_batch_size_kb != 32 && stream.video_max_batch_size_kb != 64) {
@@ -2261,6 +2305,8 @@ namespace config {
     }
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
+    int_between_f(vars, "guide_button_key", input.guide_button_key, {0, 255});
+    int_between_f(vars, "guide_button_controller", input.guide_button_controller, {0, 15});
 
     // This config option will only be used by the UI
     // When editing in the config file itself, use "keybindings"
@@ -2449,6 +2495,8 @@ namespace config {
       }
     }
 
+    bool_f(vars, "hardware_metrics", sunshine.hardware_metrics);
+    int_between_f(vars, "hardware_metrics_interval", sunshine.hardware_metrics_interval, {500, 10000});
     bool_f(vars, "realtime_stats_enabled", sunshine.realtime_stats_enabled);
     int_between_f(vars, "realtime_stats_poll_interval_ms", sunshine.realtime_stats_poll_interval_ms, {250, 60000});
 
@@ -2467,6 +2515,10 @@ namespace config {
     }
 
 #ifdef _WIN32
+    platf::hotkey::update_end_stream_hotkey(
+      video.dd.end_stream_hotkey,
+      video.dd.end_stream_hotkey_modifiers
+    );
     platf::hotkey::update_restore_hotkey(
       video.dd.snapshot_restore_hotkey,
       video.dd.snapshot_restore_hotkey_modifiers
@@ -2479,6 +2531,13 @@ namespace config {
       }
     }
 
+    // Publish the completed timeout after configuration parsing and side effects succeed.
+    // A pending CONNECT can keep using the last completed policy during apply.
+    g_control_peer_timeout_ms.store(static_cast<std::uint32_t>(control_peer_timeout.count()), std::memory_order_release);
+
+    // Publish only after parsing and apply_config side effects succeed. Reset
+    // and failed applies leave the preceding completed settings visible.
+    g_hardware_metrics_config.publish({sunshine.hardware_metrics, sunshine.hardware_metrics_interval});
   }
 
   int parse(int argc, char *argv[]) {
@@ -2559,6 +2618,7 @@ namespace config {
 
       merge_config_overrides(vars, cmd_vars);
       update_base_adapter_config_snapshot(vars);
+      update_base_session_input_config_snapshot(vars);
 
       // Apply the config. Note: This will try to create any paths
       // referenced in the config, so we may receive exceptions if
@@ -2662,6 +2722,19 @@ namespace config {
     std::mutex g_runtime_overrides_mutex;
     std::unordered_map<std::string, std::string> g_runtime_config_overrides;
 
+    std::mutex g_session_input_config_mutex;
+    std::unordered_map<std::string, std::string> g_base_guide_button_vars;
+
+    void update_base_session_input_config_snapshot(const std::unordered_map<std::string, std::string> &vars) {
+      std::lock_guard<std::mutex> lock(g_session_input_config_mutex);
+      g_base_guide_button_vars.clear();
+      for (const auto key : {"guide_button_key", "guide_button_controller"}) {
+        if (const auto it = vars.find(key); it != vars.end()) {
+          g_base_guide_button_vars.emplace(*it);
+        }
+      }
+    }
+
     struct adapter_config_pair_t {
       std::string name;
       std::string pnp_id;
@@ -2754,6 +2827,8 @@ namespace config {
         "motion_as_ds4",
         "touchpad_as_ds4",
         "back_button_timeout",
+        "guide_button_key",
+        "guide_button_controller",
         "keyboard",
         "key_repeat_delay",
         "key_repeat_frequency",
@@ -2806,6 +2881,7 @@ namespace config {
         // Codec / capture negotiation
         "fec_percentage",
         "video_max_batch_size_kb",
+        "pacing_batch_demand_limit",
         "pyrowave_critical_fec_percentage",
         "qp",
         "min_threads",
@@ -3199,6 +3275,28 @@ namespace config {
     base.insert_or_assign(std::string(adapter_pnp_id_key), adapter_pnp_id->second);
   }
 
+  ::input::guide_button_config_t guide_button_config_for_session(
+    const std::unordered_map<std::string, std::string> &app_overrides,
+    const std::unordered_map<std::string, std::string> &client_overrides
+  ) {
+    std::unordered_map<std::string, std::string> vars;
+    {
+      std::lock_guard<std::mutex> lock(g_session_input_config_mutex);
+      vars = g_base_guide_button_vars;
+    }
+    for (const auto *layer : {&app_overrides, &client_overrides}) {
+      for (const auto key : {"guide_button_key", "guide_button_controller"}) {
+        if (const auto it = layer->find(key); it != layer->end()) {
+          vars.insert_or_assign(it->first, it->second);
+        }
+      }
+    }
+    ::input::guide_button_config_t result;
+    int_between_f(vars, "guide_button_key", result.key, {0, 255});
+    int_between_f(vars, "guide_button_controller", result.controller, {0, 15});
+    return result;
+  }
+
   bool adapter_config_overrides_compatible_with_active(
     const std::unordered_map<std::string, std::string> &requested_overrides
   ) {
@@ -3336,6 +3434,7 @@ namespace config {
       auto vars = parse_config(file_handler::read_file(sunshine.config_file.c_str()));
       merge_config_overrides(vars, command_line_overrides);
       update_base_adapter_config_snapshot(vars);
+      update_base_session_input_config_snapshot(vars);
 
       // Apply runtime overrides (per-app) on top of file values so hot-apply and deferred reloads
       // keep the effective config consistent while an app is running.

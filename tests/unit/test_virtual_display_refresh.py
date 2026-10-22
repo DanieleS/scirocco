@@ -72,13 +72,17 @@ namespace display_helper_integration::helpers {
 ''' + function(source, "double get_refresh_rate_value(") + function(source, "void limit_virtual_display_refresh(") + r'''
  class SessionDisplayConfigurationHelper {
  public:
-   SessionDisplayConfigurationHelper(const config::video_t &v, const rtsp_stream::launch_session_t &s, bool)
-     : effective_video_config_(v), session_(s) {}
+   SessionDisplayConfigurationHelper(const config::video_t &v, const rtsp_stream::launch_session_t &s, bool,
+                                     bool include_request_detail_log_fields = true)
+     : effective_video_config_(v), session_(s), include_request_detail_log_fields_(include_request_detail_log_fields) {}
    std::optional<display_device::SingleDisplayConfiguration> initial_virtual_display_configuration() const;
  private:
    config::video_t effective_video_config_;
    const rtsp_stream::launch_session_t &session_;
+   bool include_request_detail_log_fields_;
  };
+ // Declared as in display_helper_request_helpers.h, which defaults the log-detail flag.
+ void resolve_virtual_display_refresh(const config::video_t &, rtsp_stream::launch_session_t &, bool = true);
 ''' + function(source, "std::optional<display_device::SingleDisplayConfiguration> SessionDisplayConfigurationHelper::initial_virtual_display_configuration()") + function(source, "void resolve_virtual_display_refresh(") + r'''
 }
 int main() {

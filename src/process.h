@@ -44,10 +44,7 @@ namespace VDISPLAY {
 
 #endif
 
-#define VIRTUAL_DISPLAY_UUID "8902CB19-674A-403D-A587-41B092E900BA"
-#define FALLBACK_DESKTOP_UUID "EAAC6159-089A-46A9-9E24-6436885F6610"
-#define REMOTE_INPUT_UUID "8CB5C136-DA67-4F99-B4A1-F9CD35005CF4"
-#define TERMINATE_APP_UUID "E16CBE1B-295D-4632-9A76-EC4180C857D3"
+#include "legacy_generated_app_identities.h"
 
 namespace bp = boost_process_shim;
 #define DEFAULT_APP_IMAGE_PATH SUNSHINE_ASSETS_DIR "/box.png"
@@ -112,6 +109,8 @@ namespace proc {
     void launch_input_only();
 
     // Callers holding the configuration read gate must defer cleanup writes.
+    // The caller owns stream lifecycle serialization. Startup returns 503 before
+    // mutation when terminal admission is closed; an admitted execute stays counted.
     int execute(const ctx_t &_app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session, bool config_read_gate_held = false);
 
     /**
@@ -249,6 +248,8 @@ namespace proc {
   bool check_valid_png(const std::filesystem::path &path);
   std::string validate_app_image_path(std::string app_image_path);
   std::optional<std::string> read_validated_app_image(const std::string &validated_path);
+  std::optional<std::string> read_configured_app_image(const std::string &image_path);
+  std::string configured_app_image_version(const ctx_t &app);
   std::string calculate_app_cover_fingerprint(std::string app_image_path);
   void refresh(const std::string &file_name, bool needs_terminate = true);
   void migrate_apps(nlohmann::json *fileTree_p, nlohmann::json *inputTree_p);

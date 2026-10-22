@@ -21,6 +21,7 @@ def function(name):
 
 program = r'''
 #include <cassert>
+#include "tests/unit/display_helper_borrow_fixture.h"
 #include <cstdint>
 #include <functional>
 #include <iostream>
