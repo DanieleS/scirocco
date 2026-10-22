@@ -796,7 +796,9 @@ set(SUNSHINE_TEST_VDD_DRIVER_ROOT "${SUNSHINE_TEST_REPOSITORY_ROOT}/third-party/
 if(EXISTS "${SUNSHINE_TEST_VDD_DRIVER_ROOT}/control_client.cpp")
     sunshine_register_component(NAME test_component_virtual_display_catalog_policy
         TEST_SOURCE unit/platform/windows/test_virtual_display_catalog_policy.cpp
+        # control_client.cpp validates frame-push targets with frame_transport_protocol.cpp.
         PRODUCT_SOURCES "${SUNSHINE_TEST_VDD_DRIVER_ROOT}/control_client.cpp" "${SUNSHINE_TEST_VDD_DRIVER_ROOT}/control_protocol.cpp"
+            "${SUNSHINE_TEST_VDD_DRIVER_ROOT}/frame_transport_protocol.cpp"
         INCLUDE_DIRECTORIES "${SUNSHINE_TEST_VDD_DRIVER_ROOT}/include")
 endif()
 
@@ -1727,6 +1729,9 @@ if(WIN32)
             "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/display_helper_v2/snapshot.cpp"
             "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/display_helper_v2/snapshot_codec.cpp"
             "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/display_helper_v2/state_machine.cpp"
+            # The snapshot comparisons use libdisplaydevice's type operators, as in the portable target.
+            "${SUNSHINE_TEST_REPOSITORY_ROOT}/third-party/libdisplaydevice/src/windows/types.cpp"
+            "${SUNSHINE_TEST_REPOSITORY_ROOT}/third-party/libdisplaydevice/src/common/types.cpp"
         LINK_LIBRARIES sunshine_test_displaydevice_headers Boost::algorithm nlohmann_json::nlohmann_json)
     sunshine_register_component(NAME test_component_display_helper_v2_topology_transition TEST_SOURCE unit/test_display_helper_v2_topology_transition.cpp
         PRODUCT_SOURCES

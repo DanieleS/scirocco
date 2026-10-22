@@ -7,6 +7,8 @@
 #include <string>
 #include <utility>
 
+#include "src/platform/windows/virtual_display_policy.h"
+
 namespace VDISPLAY::policy {
   // If the caller has an exact stable target identity, do not let a client
   // friendly-name match replace it during reuse.
@@ -147,12 +149,7 @@ namespace VDISPLAY::policy {
     return candidate_matches && matching_candidate_count == 1;
   }
 
-  inline bool defer_unidentified_readiness_candidate(
-    bool exact_target,
-    bool has_dynamic_identity_hint
-  ) noexcept {
-    return !exact_target && !has_dynamic_identity_hint;
-  }
+  // defer_unidentified_readiness_candidate lives in virtual_display_policy.h.
 
   class inactive_reactivation_budget_t {
   public:
