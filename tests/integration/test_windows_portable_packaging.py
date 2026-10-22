@@ -46,9 +46,12 @@ def main():
         redist = fixture / "compiler redist"
         redist.mkdir()
         imports = []
-        for name in ("vcruntime140_1", "vcruntime140", "zlib1", "libwebrtc", "vibeshine_truehdr", "nvngx_truehdr"):
+        # NGX TrueHDR imports the CUDA driver API, which only an NVIDIA driver provides.
+        dependencies = {"vcruntime140": "vcruntime140_1", "libwebrtc": "vcruntime140",
+                        "vibeshine_truehdr": "vcruntime140", "nvngx_truehdr": "nvcuda"}
+        for name in ("vcruntime140_1", "vcruntime140", "nvcuda", "zlib1", "libwebrtc", "vibeshine_truehdr", "nvngx_truehdr"):
             source = fixture / f"{name}.c"
-            dependency = "vcruntime140_1" if name == "vcruntime140" else "vcruntime140" if name in ("libwebrtc", "vibeshine_truehdr") else None
+            dependency = dependencies.get(name)
             extra_import = f"__declspec(dllimport) int {dependency}_fixture(void);\n" if dependency else ""
             value = f"{dependency}_fixture()" if dependency else "0"
             source.write_text(extra_import + f"__declspec(dllexport) int {name}_fixture(void) {{ return {value}; }}\n")
@@ -62,6 +65,8 @@ def main():
                 imports.append(library)
         for name in ("vcruntime140", "vcruntime140_1"):
             shutil.move(payload / (name + ".dll"), redist / (name + ".dll"))
+        # Driver-provided: absent from the build host and from the ZIP alike.
+        (payload / "nvcuda.dll").unlink()
         source = fixture / "host.c"
         source.write_text("""__declspec(dllimport) int zlib1_fixture(void);
 __declspec(dllimport) int libwebrtc_fixture(void);

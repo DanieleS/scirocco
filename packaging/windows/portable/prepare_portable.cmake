@@ -159,7 +159,10 @@ function(sunshine_prepare_windows_portable)
             RESOLVED_DEPENDENCIES_VAR _resolved
             UNRESOLVED_DEPENDENCIES_VAR _unresolved
             CONFLICTING_DEPENDENCIES_PREFIX _conflicts
-            PRE_EXCLUDE_REGEXES "^(api|ext)-ms-win-")
+            # nvcuda.dll is the CUDA driver API, installed by the NVIDIA display
+            # driver rather than redistributable; NGX TrueHDR imports it directly.
+            # It resolves on any host that can use TrueHDR and must never ship.
+            PRE_EXCLUDE_REGEXES "^(api|ext)-ms-win-" "^[Nn][Vv][Cc][Uu][Dd][Aa][.][Dd][Ll][Ll]$")
         foreach(_dependency IN LISTS _resolved)
             sunshine_portable_validate_pe("${_dependency}" "${_machine}")
         endforeach()
