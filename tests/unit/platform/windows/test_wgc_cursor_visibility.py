@@ -105,6 +105,8 @@ namespace Windows::Graphics::Capture {struct IGraphicsCaptureSession2 {};}
 }
 namespace boost::log {struct core {static core* get(){static core c;return &c;}void set_filter(bool){}};}
 int severity=0; constexpr int INITIAL_LOG_LEVEL=2;
+// INamedPipe exposes the pipe peer process ID as a Win32 DWORD.
+using DWORD=std::uint32_t;
 namespace platf {struct img_t{};namespace dxgi {
 // WIRE
 // INTERFACE

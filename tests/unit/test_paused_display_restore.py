@@ -71,6 +71,8 @@ program = r'''
 #include <vector>
 // Load the actual admission guard before selecting the fixture platform.
 #include "src/host_stream_control.h"
+// Borrowed exact outputs are protected from the idle restore too (display_target leases).
+#include "src/display_target_lease.h"
 #ifndef _WIN32
 #define _WIN32 1
 #endif

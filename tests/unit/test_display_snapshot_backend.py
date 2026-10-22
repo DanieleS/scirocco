@@ -47,6 +47,7 @@ def program(root):
 #include <thread>
 #include <vector>
 #include "src/platform/windows/display_snapshot_restore.h"
+#include "tests/unit/display_helper_borrow_fixture.h"
 using namespace std::chrono_literals;
 namespace display_device {
   enum class DisplayRecoveryBehavior { Skip };

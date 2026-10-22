@@ -117,6 +117,7 @@ ticket_declaration = ticket_declaration.replace("FINAL_RESTORE_DEFAULT", ", Fina
 
 program = r'''
 #include <atomic>
+#include "tests/unit/display_helper_borrow_fixture.h"
 #include <array>
 #include <cassert>
 #include <chrono>

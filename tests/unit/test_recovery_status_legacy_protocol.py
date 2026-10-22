@@ -80,6 +80,7 @@ v2_result_callback = block_after(v2, "[&response_pipe](std::uint64_t ticket, dis
 
 program = r'''
 #include <algorithm>
+#include "tests/unit/display_helper_borrow_fixture.h"
 #include <atomic>
 #include <cassert>
 #include <cstdint>

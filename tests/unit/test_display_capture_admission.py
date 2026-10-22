@@ -24,10 +24,16 @@ apply = source[start:end]
 # connection (in particular before the user can remotely unlock Windows).
 nvhttp = (root / "src/nvhttp.cpp").read_text()
 request_marker = "auto request = display_helper_integration::helpers::build_request_from_session(config::video, *launch_session);"
-launch_start = nvhttp.rindex(request_marker, 0, nvhttp.index("// Wait for display setup"))
+# nvhttp passes whether the request log carries the launch trace identity.
+nvhttp_request_marker = ("auto request = display_helper_integration::helpers::build_request_from_session(\n"
+                         "          config::video,\n"
+                         "          *launch_session,\n"
+                         "          dispatch::include_request_identity_log_fields(trace_id)\n"
+                         "        );")
+launch_start = nvhttp.rindex(nvhttp_request_marker, 0, nvhttp.index("// Wait for display setup"))
 launch_end = nvhttp.index("// Apply a per-client HDR profile", launch_start)
 launch_block = nvhttp[launch_start:launch_end]
-resume_start = nvhttp.index(request_marker, launch_end)
+resume_start = nvhttp.index(nvhttp_request_marker, launch_end)
 resume_end = nvhttp.index("// Apply a per-client HDR profile", resume_start)
 resume_block = nvhttp[resume_start:resume_end]
 webrtc = (root / "src/webrtc_stream.cpp").read_text()
@@ -41,6 +47,7 @@ skip_revert = process[skip_start:skip_end]
 
 program = r'''
 #include <cassert>
+#include "tests/unit/display_helper_borrow_fixture.h"
 #include <chrono>
 #include <functional>
 #include <iostream>
@@ -114,7 +121,7 @@ namespace display_helper_integration {
     return fake::verification;
   }
   namespace helpers {
-    std::optional<DisplayApplyRequest> build_request_from_session(int, Session &session) {
+    std::optional<DisplayApplyRequest> build_request_from_session(int, Session &session, bool = false) {
       if (!fake::has_request) return std::nullopt;
       return DisplayApplyRequest {&session, {}};
     }
@@ -125,6 +132,7 @@ namespace display_helper_integration {
 program += apply + r'''
 }
 namespace config { int video = 0; }
+namespace dispatch { bool include_request_identity_log_fields(int) { return false; } }
 struct Tree {
   template<class T> void put(const char *, const T &) { assert(false && "display setup rejected the stream"); }
 };
@@ -136,6 +144,7 @@ for name, block in (("launch", launch_block), ("resume", resume_block), ("webrtc
   Tree tree;
   const auto display_startup_deadline = std::chrono::steady_clock::now() + 100ms;
   const std::function<bool()> display_startup_cancelled = [] { return display_helper_integration::fake::cancelled; };
+  [[maybe_unused]] const int trace_id = 0;
 '''
     program += block
     program += '  display_helper_integration::fake::events.emplace_back("capture");\n'
@@ -222,7 +231,7 @@ with tempfile.TemporaryDirectory(prefix="vibeshine-capture-admission-") as temp:
     fixture = path / "admission.cpp"
     binary = path / "admission"
     fixture.write_text(program)
-    subprocess.run([compiler, "-std=c++23", "-pthread", str(fixture), "-o", str(binary)], check=True)
+    subprocess.run([compiler, "-std=c++23", "-pthread", "-I", str(root), str(fixture), "-o", str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
 print("Display capture admission scenarios passed")
 
@@ -233,6 +242,8 @@ monitor_header = monitor_header.replace("#pragma once\n", "")
 monitor_header = monitor_header.replace("#include <windows.h>\n", "").replace("#include <dxgi1_6.h>\n", "")
 monitor_source = (root / "src/platform/windows/display_output_monitor.cpp").read_text()
 monitor_methods = monitor_source[monitor_source.index("  display_output_monitor_t::display_output_monitor_t"):]
+monitor_helpers = monitor_source[monitor_source.index("    wgc_policy::output_target_identity_t target_identity("):
+                                 monitor_source.index("    std::optional<output_sample_t> sample_output(")]
 # Advance only the monitor's observation clock; keep the actual worker, waits,
 # stop token and reinit flag so transient faults exercise production behavior.
 monitor_methods = monitor_methods.replace("std::chrono::steady_clock::now()", "MonitorClock::now()")
@@ -248,11 +259,14 @@ monitor_program = r'''
 #include "src/platform/windows/wgc_capture_policy.h"
 #define BOOST_LOG(level) std::clog
 using namespace std::chrono_literals;
-struct LUID {};
+struct LUID { std::uint32_t LowPart = 0; std::int32_t HighPart = 0; };
+using HMONITOR = void *;
+constexpr bool FALSE = false;
 struct RECT { int left, top, right, bottom; };
 struct DXGI_OUTPUT_DESC {
   wchar_t DeviceName[32] {};
-  int Monitor = 1, Rotation = 0;
+  HMONITOR Monitor = reinterpret_cast<HMONITOR>(std::uintptr_t {1});
+  int Rotation = 0;
   bool AttachedToDesktop = true;
   RECT DesktopCoordinates {0, 0, 1920, 1080};
 };
@@ -287,14 +301,16 @@ namespace platf::dxgi {
   };
   struct output_sample_t {
     std::shared_ptr<Factory> factory;
+    LUID adapter_luid {};
     DXGI_OUTPUT_DESC desc {};
     bool hdr_valid = true, hdr = false;
   };
+''' + monitor_helpers + r'''
   std::optional<output_sample_t> sample_output(LUID, const wchar_t *) {
     std::optional<output_sample_t> result;
     if (fake::available && !fake::fail_next.exchange(false)) {
-      result = output_sample_t {std::make_shared<Factory>(Factory {fake::revision}), {}, fake::hdr_valid, fake::hdr};
-      result->desc.Monitor = fake::monitor_id;
+      result = output_sample_t {std::make_shared<Factory>(Factory {fake::revision}), {}, {}, fake::hdr_valid, fake::hdr};
+      result->desc.Monitor = reinterpret_cast<HMONITOR>(static_cast<std::uintptr_t>(fake::monitor_id.load()));
       result->desc.Rotation = fake::rotation;
       result->desc.DesktopCoordinates.right = fake::right;
       result->desc.AttachedToDesktop = fake::attached;
@@ -314,7 +330,7 @@ int main() {
   // Both directions follow the real display state, including 10-bit SDR sources.
   for (bool initial_hdr : {false, true}) {
     fake::reset(initial_hdr);
-    display_output_monitor_t monitor({}, {}, true, initial_hdr, 0, 0, 1920, 1080);
+    display_output_monitor_t monitor({}, {}, true, initial_hdr, 0, 0, 1920, 1080, false);
     await([] { return fake::samples > 0; });
     assert(!monitor.reinit_requested());
     fake::hdr = !initial_hdr; ++fake::revision;
@@ -323,7 +339,7 @@ int main() {
   // A topology notification with the same source color needs no frame hold/reinit.
   fake::reset(true);
   {
-    display_output_monitor_t monitor({}, {}, true, true, 0, 0, 1920, 1080);
+    display_output_monitor_t monitor({}, {}, true, true, 0, 0, 1920, 1080, false);
     await([] { return fake::samples > 0; });
     ++fake::revision;
     await([] { return fake::samples > 1; });
@@ -339,7 +355,7 @@ int main() {
   // restart an otherwise unchanged capture. Each recovery resets the budget.
   fake::reset(true); fake::event_subscription = true;
   {
-    display_output_monitor_t monitor({}, {}, true, true, 0, 0, 1920, 1080);
+    display_output_monitor_t monitor({}, {}, true, true, 0, 0, 1920, 1080, false);
     await([] { return fake::samples > 0; });
     for (int event = 0; event < 10; ++event) {
       const auto previous_samples = fake::samples.load();
@@ -354,7 +370,7 @@ int main() {
   // factory. Real HDR changes remain immediate after observation recovers.
   fake::reset(false); fake::fail_next = true; fake::event_subscription = true;
   {
-    display_output_monitor_t monitor({}, {}, true, false, 0, 0, 1920, 1080);
+    display_output_monitor_t monitor({}, {}, true, false, 0, 0, 1920, 1080, false);
     await([] { return fake::samples >= 2; });
     assert(!monitor.reinit_requested());
     fake::hdr = true; ++fake::revision;
@@ -364,7 +380,7 @@ int main() {
   // only a nullopt observation receives the retry window.
   fake::reset(true);
   {
-    display_output_monitor_t monitor({}, {}, true, true, 0, 0, 1920, 1080);
+    display_output_monitor_t monitor({}, {}, true, true, 0, 0, 1920, 1080, false);
     await([] { return fake::samples > 0; });
     fake::hdr_valid = false; ++fake::revision;
     await([&] { return monitor.reinit_requested(); });
@@ -372,7 +388,7 @@ int main() {
   // Neighbouring output changes still refresh absolute-input coordinates.
   fake::reset(false);
   {
-    display_output_monitor_t monitor({}, {}, true, false, 0, 0, 1920, 1080);
+    display_output_monitor_t monitor({}, {}, true, false, 0, 0, 1920, 1080, false);
     await([] { return fake::samples > 0; });
     fake::width = 2560;
     await([&] { return monitor.reinit_requested(); });
@@ -381,7 +397,7 @@ int main() {
   // added diagnostics must not filter a handle, rotation, rectangle or detach.
   for (int change = 0; change < 4; ++change) {
     fake::reset(false);
-    display_output_monitor_t monitor({}, {}, true, false, 0, 0, 1920, 1080);
+    display_output_monitor_t monitor({}, {}, true, false, 0, 0, 1920, 1080, false);
     await([] { return fake::samples > 0; });
     if (change == 0) fake::monitor_id = 2;
     if (change == 1) fake::rotation = 1;

@@ -26,6 +26,9 @@ def function(source, marker, last=False):
 PRELUDE = r'''
 #include "src/platform/linux/kmsgrab_hdr.h"
 #include "src/platform/linux/session_backend.h"
+// captureThread records recovery observations and fans out terminal input geometry.
+#include "src/capture_recovery.h"
+#include "src/input_geometry_policy.h"
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -84,6 +87,13 @@ namespace safe {
     bool running() const { return active; }
     void stop() { active = false; }
     auto &unsafe() { return items; }
+    std::vector<T> drain() {
+      std::vector<T> values;
+      if (!active) return values;
+      for (auto &value : items) values.emplace_back(std::move(value));
+      items.clear();
+      return values;
+    }
     std::optional<T> pop() { if (probe::on_pop) probe::on_pop(); if (items.empty()) return {}; auto t=std::move(items.front()); items.pop_front(); return t; }
     template<class D> std::optional<T> pop(D) { return pop(); }
     void raise(const T &) { ++probe::deliveries; if (probe::on_frame) probe::on_frame(); }
@@ -109,6 +119,7 @@ namespace video {
     int dynamicRange=1, encoderCscMode=2, chromaSamplingType=0;
     capture_source_e capture_source=capture_source_e::active_output;
     std::optional<std::string> capture_output;
+    std::function<bool()> capture_target_valid;
   };
 @@COLOR_FUNCTIONS@@
 }
@@ -121,6 +132,7 @@ namespace platf {
   };
   struct display_t {
     virtual ~display_t() = default;
+    std::uint64_t recovery_capture_instance {0};
     virtual bool is_hdr() = 0;
     virtual bool get_hdr_metadata(SS_HDR_METADATA&) = 0;
     virtual capture_e capture(const push_captured_image_cb_t&, const pull_free_image_cb_t&, bool*) = 0;
@@ -212,9 +224,12 @@ namespace video {
   constexpr unsigned YUV444_SUPPORT=1;
   namespace logging { auto bracket(auto value) { return value; } }
 @@MAKE_ENCODE_DEVICE@@
+  struct touch_port_event_t {};
+  void raise_touch_port_if_geometry_changed(const touch_port_event_t &, platf::display_t *, const config_t &) {}
   struct capture_ctx_t {
     config_t config;
     std::shared_ptr<safe::queue_t<std::shared_ptr<platf::img_t>>> images;
+    touch_port_event_t touch_port_events;
   };
   struct capture_pacing_context_t {};
   bool display_cursor=false;
@@ -281,7 +296,7 @@ namespace proc { struct proc_t { std::string display_name; }; inline proc_t proc
 namespace video {
 @@CAPTURE_THREAD@@
   using encode_e = platf::capture_e;
-  struct sync_context_t { config_t config; };
+  struct sync_context_t { config_t config; touch_port_event_t touch_port_events; };
   struct sync_lifetime_t { sync_lifetime_t() { ++probe::sync_live_sessions; } ~sync_lifetime_t() { --probe::sync_live_sessions; } };
   struct sync_session_t { std::shared_ptr<platf::display_t> display; std::shared_ptr<sync_lifetime_t> lifetime; };
   std::optional<sync_session_t> make_synced_session(std::shared_ptr<platf::display_t> disp, const encoder_t&, platf::img_t&, sync_context_t&) {
