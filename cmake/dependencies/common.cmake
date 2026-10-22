@@ -24,13 +24,14 @@ include(dependencies/libvirtualdisplay_source)
 set(BUILD_VIBESHINE_KWIN_GPU_BRIDGE ON CACHE BOOL
         "Build the bundled libvirtualdisplay KWin GPU-association bridge" FORCE)
 add_subdirectory("${SUNSHINE_LIBVIRTUALDISPLAY_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/third-party/libvirtualdisplay")
-# The driver library links kernelbase for CompareObjectHandles, but mingw-w64 has
-# no kernelbase import library: it exports that API from api-ms-win-core-handle.
+# The driver library links kernelbase for CompareObjectHandles, which only its
+# frame-push importer calls and the host never links; MinGW ships no kernelbase
+# (or api-ms-win-core-handle) import library, so drop it there.
 if(MINGW AND TARGET libvirtualdisplay_driver)
     foreach(_libvirtualdisplay_property LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
         get_target_property(_libvirtualdisplay_links libvirtualdisplay_driver ${_libvirtualdisplay_property})
         if(_libvirtualdisplay_links)
-            string(REPLACE "kernelbase" "api-ms-win-core-handle-l1-1-0" _libvirtualdisplay_links "${_libvirtualdisplay_links}")
+            list(FILTER _libvirtualdisplay_links EXCLUDE REGEX "kernelbase")
             set_target_properties(libvirtualdisplay_driver PROPERTIES ${_libvirtualdisplay_property} "${_libvirtualdisplay_links}")
         endif()
     endforeach()
