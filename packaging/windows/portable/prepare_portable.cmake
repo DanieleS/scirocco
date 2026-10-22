@@ -219,6 +219,10 @@ function(sunshine_prepare_windows_portable)
     if(_copied_runtime)
         message(FATAL_ERROR "Portable compiler runtime dependency closure exceeded 32 staging passes.")
     endif()
+    # nvcuda.dll ships with the NVIDIA display driver, never with an app, and is
+    # absent on hosts without an NVIDIA GPU (including CI runners). The NVIDIA
+    # runtime DLLs that import it are only loaded where the driver provides it.
+    list(FILTER _unresolved EXCLUDE REGEX "^[Nn][Vv][Cc][Uu][Dd][Aa][.][Dd][Ll][Ll]$")
     if(_unresolved)
         message(FATAL_ERROR "Unresolved portable DLL imports: ${_unresolved}")
     endif()
