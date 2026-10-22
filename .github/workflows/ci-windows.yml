@@ -828,7 +828,8 @@ jobs:
             "${web_ui_arg[@]}"
           echo "::add-matcher::.github/matchers/gcc.json"
           ccache -z
-          cmake --build build --target all --parallel "$CMAKE_BUILD_PARALLEL_LEVEL"
+          # -k 0: keep compiling past the first error, so one CI run reports all of them.
+          cmake --build build --target all --parallel "$CMAKE_BUILD_PARALLEL_LEVEL" -- -k 0
           echo "::remove-matcher owner=gcc::"
           ccache -s
 

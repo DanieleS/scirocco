@@ -2144,6 +2144,11 @@
           "wlr": "wlroots screencopy",
           "x11": "X11 (XCB)"
         },
+        "capture_provider": {
+          "gamebar": "Xbox Game Bar",
+          "nvidia": "NVIDIA app / GeForce Experience",
+          "off": "Off"
+        },
         "codec": {
           "eight_bit": "8-bit",
           "hdr_ten_bit": "8-bit and 10-bit HDR"

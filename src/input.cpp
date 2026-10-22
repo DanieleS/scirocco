@@ -2162,6 +2162,40 @@ namespace input {
     }
   }
 
+  void press_chord(std::shared_ptr<input_t> &input, const std::span<const std::uint16_t> keys) {
+    if (keys.empty() || !config::input.keyboard) {
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> lg(input->input_queue_lock);
+      if (input->input_closed) {
+        return;
+      }
+    }
+
+    // Hold each key as one more owner, so a client pressing the same key meanwhile neither
+    // presses it twice nor releases it under the shortcut. Some tools ignore a shortcut
+    // whose keys come up in the same instant, hence the delay before the release.
+    task_pool.push([chord = std::vector<std::uint16_t>(keys.begin(), keys.end())]() {
+      for (const auto key : chord) {
+        auto &host = host_keys[host_keycode(key)];
+        if (host.owners++ == 0) {
+          host.key = key;
+          host.flags = 0;
+          platf::keyboard_update(platf_input, key, false, 0);
+        }
+      }
+      task_pool.pushDelayed(
+        [chord]() {
+          for (auto it = chord.rbegin(); it != chord.rend(); ++it) {
+            release_key(held_key_t {*it, 0, 0});
+          }
+        },
+        25ms
+      );
+    });
+  }
+
 #ifdef SUNSHINE_TESTS
   bool validate_packet_for_tests(const std::vector<std::uint8_t> &input_data) {
     return validate_packet(input_data).has_value();

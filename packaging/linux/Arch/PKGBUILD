@@ -3,6 +3,7 @@
 
 ## options
 : "${_use_cuda:=detect}" # nvenc
+: "${_keep_going:=OFF}" # CI: ninja -k 0, report every compile error in one build
 
 : "${_commit:=@GITHUB_COMMIT@}"
 
@@ -214,7 +215,9 @@ build() {
       python3 "$srcdir/$pkgname/scripts/build-linux-component-tests.py" build
     fi
 
-    cmake --build build
+    local _native_build_args=()
+    [[ "${_keep_going}" == "ON" ]] && _native_build_args=(-- -k 0)
+    cmake --build build "${_native_build_args[@]}"
 }
 
 check() {

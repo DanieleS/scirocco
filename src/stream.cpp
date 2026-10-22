@@ -41,6 +41,7 @@ extern "C" {
 }
 
 // local includes
+#include "capture_action.h"
 #include "config.h"
 #include "control_peer_timeout.h"
 #include "crypto.h"
@@ -1793,6 +1794,31 @@ namespace stream {
         BOOST_LOG(debug) << "Permission File Upload deined for [" << session->device_name << "]";
         return;
       }
+    });
+
+    // Vibepollo protocol extension, see capture_action.h
+    server->map(capture_action::packet_type, [](session_t *session, const std::string_view &payload) {
+      const auto provider = session->config.captureProvider;
+      if (provider == capture_action::provider_t::off) {
+        // Not negotiated, or no provider: the client was told, so this is a stray message
+        BOOST_LOG(debug) << "Ignoring capture action from ["sv << session->device_name << "]: not negotiated or no provider"sv;
+        return;
+      }
+
+      // The host presses keys on the client's behalf, so it takes keyboard permission
+      if (!(session->permission & crypto::PERM::input_kbd)) {
+        BOOST_LOG(debug) << "Permission Keyboard Input denied for capture action from ["sv << session->device_name << "]";
+        return;
+      }
+
+      const auto action = capture_action::decode_payload(payload);
+      if (!action) {
+        BOOST_LOG(warning) << "Ignoring malformed or unknown capture action ("sv << payload.size() << " bytes)"sv;
+        return;
+      }
+
+      BOOST_LOG(info) << "Capture action from ["sv << session->device_name << "]: "sv << capture_action::to_string(*action) << " via "sv << capture_action::to_string(provider);
+      input::press_chord(session->input, capture_action::chord(provider, *action));
     });
 
     server->map(packetTypes[IDX_ENCRYPTED], [server](session_t *session, const std::string_view &payload) {

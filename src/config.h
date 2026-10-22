@@ -17,6 +17,7 @@
 #include <vector>
 
 // local includes
+#include "capture_action.h"
 #include "config_display_transition.h"
 #include "hardware_metrics_config.h"
 #include "input_session_config.h"
@@ -356,6 +357,7 @@ namespace config {
     bool forward_rumble;
 
     bool focus_hints;  ///< Tell clients that ask when a text field takes focus. Windows only.
+    capture_action::provider_t capture_provider;  ///< Tool that carries out clients' capture actions. Windows only.
   };
 
   struct frame_limiter_t {

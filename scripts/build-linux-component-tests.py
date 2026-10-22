@@ -1,5 +1,6 @@
 """Build every configured component and fast policy target before the full Linux package build."""
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -26,7 +27,9 @@ def component_targets(build):
 def main(build):
     targets = component_targets(build)
     print(f"Early test compile gate: {len(targets)} targets", flush=True)
-    subprocess.run(["cmake", "--build", str(build), "--target", *targets], check=True)
+    # CI sets _keep_going=ON so one run reports every compile error, not just the first.
+    native = ["--", "-k", "0"] if os.environ.get("_keep_going") == "ON" else []
+    subprocess.run(["cmake", "--build", str(build), "--target", *targets, *native], check=True)
 
 
 if __name__ == "__main__":

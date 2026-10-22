@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -31,6 +32,15 @@ namespace input {
   // Order Guide neutralization on the input worker after a live permission loss.
   // Queued Guide presses retain admission permission and the permission generation.
   void update_guide_button_permissions(const std::shared_ptr<input_t> &input, const crypto::PERM &permission);
+
+  /**
+   * @brief Press a host shortcut on the input worker, in order with the client's own input.
+   * @details The keys go down in order and come up in reverse a moment later, like a person
+   *          pressing them. A key the client already holds is not pressed again or released.
+   *          Does nothing once the context is reset or when the keyboard is disabled.
+   * @param keys Windows virtual-key codes, modifiers first.
+   */
+  void press_chord(std::shared_ptr<input_t> &input, std::span<const std::uint16_t> keys);
 
 #ifdef SUNSHINE_TESTS
   bool validate_packet_for_tests(const std::vector<std::uint8_t> &input_data);

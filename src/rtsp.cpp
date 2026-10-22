@@ -34,6 +34,7 @@ extern "C" {
 
 // local includes
 #include "app_audio_termination.h"
+#include "capture_action.h"
 #include "config.h"
 #include "focus_hints.h"
 #include "host_stream_control.h"
@@ -2047,9 +2048,15 @@ namespace rtsp_stream {
 
     std::stringstream ss;
 
-    // Tell the client about our supported features. Focus hints are a host feature rather
-    // than a platform input capability, and are only advertised when enabled.
-    ss << "a=x-ss-general.featureFlags:" << focus_hints::host_feature_flags((uint32_t) platf::get_capabilities(), focus_hints::offered(config::input.focus_hints)) << std::endl;
+    // Tell the client about our supported features. Focus hints and capture actions are host
+    // features rather than platform input capabilities. Focus hints are only advertised when
+    // enabled; capture actions whenever this build can carry them out, so a client knows not to
+    // press shortcuts itself even when the provider is off.
+    {
+      auto feature_flags = focus_hints::host_feature_flags((uint32_t) platf::get_capabilities(), focus_hints::offered(config::input.focus_hints));
+      feature_flags = capture_action::host_feature_flags(feature_flags, capture_action::host_supported, config::input.capture_provider);
+      ss << "a=x-ss-general.featureFlags:" << feature_flags << std::endl;
+    }
 
     // Always request new control stream encryption if the client supports it
     uint32_t encryption_flags_supported = SS_ENC_CONTROL_V2 | SS_ENC_AUDIO;
@@ -2302,6 +2309,8 @@ namespace rtsp_stream {
       config.mlFeatureFlags = (int) util::from_view(args.at("x-ml-general.featureFlags"sv));
       // Only a client that asked gets focus hints, so every other one sees today's traffic
       config.focusHints = focus_hints::negotiated(focus_hints::offered(config::input.focus_hints), (uint32_t) config.mlFeatureFlags);
+      // Fixed here, so the session uses the provider it was told about
+      config.captureProvider = capture_action::negotiated(capture_action::host_supported, config::input.capture_provider, (uint32_t) config.mlFeatureFlags);
       config.audioQosType = (int) util::from_view(args.at("x-nv-aqos.qosTrafficType"sv));
       config.videoQosType = (int) util::from_view(args.at("x-nv-vqos[0].qosTrafficType"sv));
       config.encryptionFlagsEnabled = (uint32_t) util::from_view(args.at("x-ss-general.encryptionEnabled"sv));
