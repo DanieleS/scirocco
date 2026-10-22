@@ -237,7 +237,8 @@ check() {
       fi
     fi
     if [[ "${_build_tests:-ON}" != "OFF" ]]; then
-      ctest --test-dir . --output-on-failure --no-tests=error -j"${BUILD_JOBS:-2}"
+      # Some tests run this recipe's functions: they must not inherit the CI's _tests_only.
+      (export -n _tests_only; ctest --test-dir . --output-on-failure --no-tests=error -j"${BUILD_JOBS:-2}")
     fi
 }
 
