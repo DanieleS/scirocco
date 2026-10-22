@@ -30,14 +30,14 @@ int main(int argc,char**argv) {
   auto ordinary=profile;ordinary.erase("remote-monitor-profile");ordinary["uuid"]="ordinary";
   auto before=reversed?json::array({ordinary,profile,profile}):json::array({profile,profile,ordinary});
   json root={{"apps",before}};platf::playnite::Game game;game.id="provider";game.name="Custom";game.installed=installed;
-  bool changed=false;std::size_t matched=0;policy::autosync_reconcile(root,{game},0,0,1,false,true,{},{},{},{},{},true,changed,matched,true);
+  bool changed=false;std::size_t matched=0;policy::autosync_reconcile(root,{game},true,0,0,1,false,true,{},{},{},{},{},true,false,changed,matched,true);
   assert(std::count(root["apps"].begin(),root["apps"].end(),profile)==2);
  }
  // Autosync can add an ordinary game with a canonical UUID that collides with
  // a marked identity. Actual runtime publication rejects before disk/cache.
  auto marked=profile_json(literal);fixture_environment=json::object();fixture_disk={{"apps",json::array({marked})}};fixture_writes=0;
  auto root=fixture_disk;platf::playnite::Game game;game.id=literal;game.name="Different game";game.installed=true;
- bool changed=false;std::size_t matched=0;policy::autosync_reconcile(root,{game},0,0,0,false,true,{},{},{},{},{},false,changed,matched,true);
+ bool changed=false;std::size_t matched=0;policy::autosync_reconcile(root,{game},true,0,0,0,false,true,{},{},{},{},{},false,false,changed,matched,true);
  assert(root["apps"].size()==2);bool rejected=false;
  try {platf::playnite::sync::write_and_refresh_apps(root,"fixture");}catch(const std::invalid_argument& error){rejected=!std::string(error.what()).empty();}
  assert(rejected&&fixture_writes==0&&fixture_disk["apps"]==json::array({marked}));

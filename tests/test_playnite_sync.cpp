@@ -146,7 +146,7 @@ TEST(PlayniteSync_MonitorProfiles, PreservesMarkedRowsAcrossMatchingDedupeAndPur
       game.installed=installed;
       nlohmann::json root={{"apps",reverse?nlohmann::json::array({ordinary,profile,profile}):nlohmann::json::array({profile,profile,ordinary})}};
       bool changed=false;std::size_t matched=0;
-      autosync_reconcile(root,{game},0,0,1,false,true,{},{},{},{},{},true,changed,matched,true);
+      autosync_reconcile(root,{game},true /*library complete*/,0,0,1,false,true,{},{},{},{},{},true,false /*exclude hidden*/,changed,matched,true);
       EXPECT_EQ(std::count(root["apps"].begin(),root["apps"].end(),profile),2);
       EXPECT_EQ(match_app_against_indexes(profile,{},{},{},{}),nullptr);
       auto preserved=profile;mark_app_as_playnite_auto(preserved,kSourceInstalled);EXPECT_EQ(preserved,profile);
