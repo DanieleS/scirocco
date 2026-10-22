@@ -339,6 +339,8 @@ jobs:
         working-directory: pkg
         env:
           _build_tests: ${{ inputs.build_tests && 'ON' || 'OFF' }}
+          # Keep compiling past the first error: one CI run reports all of them.
+          _keep_going: 'ON'
         run: |
           # Add problem matcher
           echo "::add-matcher::.github/matchers/gcc.json"
@@ -371,6 +373,7 @@ jobs:
             CUDA_CACHE_DIR="$CUDA_CACHE_DIR" \
             _use_cuda="${_use_cuda}" \
             _build_tests="${_build_tests}" \
+            _keep_going="${_keep_going}" \
             _validation_expected_tree="$validation_tree" \
             BUILD_JOBS="$BUILD_JOBS" \
             CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL}" \
