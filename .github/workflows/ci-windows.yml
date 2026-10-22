@@ -489,7 +489,6 @@ jobs:
             mingw-w64-${{ matrix.toolchain }}-onevpl
             mingw-w64-${{ matrix.toolchain }}-openssl
             mingw-w64-${{ matrix.toolchain }}-opus
-            mingw-w64-${{ matrix.toolchain }}-python
             mingw-w64-${{ matrix.toolchain }}-sqlite3
             mingw-w64-${{ matrix.toolchain }}-tools
 
@@ -513,8 +512,11 @@ jobs:
           $nodeBinaryPath = (Get-Command node).Source
           $nodePath = Split-Path -Path $nodeBinaryPath -Parent
           $dotnetBinaryPath = (Get-Command dotnet).Source
+          # Only the portable ZIP validator needs it; a runner without Python fails there.
+          $pythonBinaryPath = (Get-Command python -ErrorAction SilentlyContinue).Source
           "NODEJS_PATH=$nodePath" >> $env:GITHUB_ENV
           "DOTNET_PATH=$dotnetBinaryPath" >> $env:GITHUB_ENV
+          "HOST_PYTHON=$pythonBinaryPath" >> $env:GITHUB_ENV
           "nodejs-path=$nodePath"
           "dotnet-path=$dotnetBinaryPath"
 
@@ -1043,7 +1045,9 @@ jobs:
           # A failed CPack invocation must never upload an older valid ZIP.
           rm -f -- build/cpack_artifacts/*-portable.zip ci-portable/*.zip
           cmake --build build --target package_portable --parallel "$CMAKE_BUILD_PARALLEL_LEVEL"
-          python .github/scripts/validate_windows_portable.py --repository . --build build --product "$PORTABLE_PRODUCT" --version "$BUILD_VERSION" --output ci-portable
+          # MSYS2 has no Python of its own, and installing one would make CMake register
+          # the Python-driven component tests for MinGW too. Use the runner's instead.
+          "$(cygpath -u "$HOST_PYTHON")" .github/scripts/validate_windows_portable.py --repository . --build build --product "$PORTABLE_PRODUCT" --version "$BUILD_VERSION" --output ci-portable
 
       - name: Upload Windows portable ZIP (CI only)
         if: github.event_name != 'pull_request' && inputs.release_version != '' && !startsWith(inputs.release_version, '0.0.0') && !startsWith(inputs.release_version, 'v0.0.0')
