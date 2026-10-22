@@ -50,7 +50,6 @@
 #include <cwchar>
 #include <cwctype>
 #include <devguid.h>
-#include <devpkey.h>
 #include <dxgi.h>
 #include <dxgi1_6.h>
 #include <exception>
@@ -60,6 +59,10 @@
 #include <icm.h>
 #include <iomanip>
 #include <initguid.h>
+// clang-format off
+// After initguid.h: MinGW has no library that defines the DEVPKEY_* keys, so this file must.
+#include <devpkey.h>
+// clang-format on
 #include <iostream>
 #include <limits>
 #include <map>
