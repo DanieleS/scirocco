@@ -1929,7 +1929,7 @@ namespace input {
     // Signal the encoder only after the input reached the OS, so a frame captured
     // before the input was applied is never mistaken for the response to it.
     if (config::video.input_activity_boost &&
-        input->activity_tracker.evaluate(entry.data(), entry.size(), {config::input.keyboard, config::input.mouse, config::input.controller})) {
+        input->activity_tracker.evaluate(entry.data.data(), entry.data.size(),{config::input.keyboard, config::input.mouse, config::input.controller})) {
       input->input_activity_event->raise(std::chrono::steady_clock::now());
     }
 

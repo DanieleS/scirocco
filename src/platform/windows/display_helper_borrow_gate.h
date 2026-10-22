@@ -39,21 +39,21 @@ namespace display_helper::borrow {
 
     scope_t try_enter() {
       std::lock_guard lock(mutex_);
-      if (depth_[this] != 0) { ++depth_[this]; return scope_t(this); }
+      if (depth()[this] != 0) { ++depth()[this]; return scope_t(this); }
       if (inhibited_locked()) return {};
-      ++active_; depth_[this] = 1;
+      ++active_; depth()[this] = 1;
       return scope_t(this);
     }
 
     scope_t wait_enter(const std::function<bool()> &cancelled = {}) {
       std::unique_lock lock(mutex_);
-      if (depth_[this] != 0) { ++depth_[this]; return scope_t(this); }
+      if (depth()[this] != 0) { ++depth()[this]; return scope_t(this); }
       while (inhibited_locked()) {
         if (cancelled && cancelled()) return {};
         cv_.wait_for(lock, std::chrono::milliseconds(10));
       }
       if (cancelled && cancelled()) return {};
-      ++active_; depth_[this] = 1;
+      ++active_; depth()[this] = 1;
       return scope_t(this);
     }
 
@@ -94,7 +94,7 @@ namespace display_helper::borrow {
 
     bool inhibited() const { std::lock_guard lock(mutex_); return inhibited_locked(); }
     bool permanently_inhibited() const { std::lock_guard lock(mutex_); return permanent_; }
-    bool entered_on_this_thread() const { return depth_[this] != 0; }
+    bool entered_on_this_thread() const { return depth()[this] != 0; }
     std::size_t active() const { std::lock_guard lock(mutex_); return active_; }
     void retain_unknown() { std::lock_guard lock(mutex_); permanent_ = true; cv_.notify_all(); }
 
@@ -102,8 +102,8 @@ namespace display_helper::borrow {
     bool inhibited_locked() const { return permanent_ || !held_.empty(); }
     void leave() {
       std::lock_guard lock(mutex_);
-      auto it = depth_.find(this);
-      if (it != depth_.end() && --it->second == 0) { depth_.erase(it); --active_; cv_.notify_all(); }
+      auto it = depth().find(this);
+      if (it != depth().end() && --it->second == 0) { depth().erase(it); --active_; cv_.notify_all(); }
     }
     mutable std::mutex mutex_;
     std::condition_variable cv_;
@@ -111,7 +111,11 @@ namespace display_helper::borrow {
     std::map<process_context_t, std::uint64_t> retired_;
     std::size_t active_ = 0;
     bool permanent_ = false;
-    inline static thread_local std::map<const gate_t *, std::size_t> depth_;
+    // Function-local: MinGW emits a duplicate TLS init symbol per TU for inline static thread_local members.
+    static std::map<const gate_t *, std::size_t> &depth() {
+      static thread_local std::map<const gate_t *, std::size_t> value;
+      return value;
+    }
   };
   inline gate_t &process_gate() { static gate_t value; return value; }
 }
