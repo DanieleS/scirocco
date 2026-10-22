@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // local includes
@@ -51,8 +52,29 @@ namespace igdb {
   /// @brief Fetch one IGDB record, from the on-disk cache when it is still fresh.
   std::optional<policy::game_t> fetch_game(const std::string &igdb_id, std::string &error_out);
 
+  /**
+   * @brief Fetch many IGDB records, keyed by id, a few hundred per request.
+   *
+   * Fresh cache entries cost nothing; the rest go out in chunks of policy::k_bulk_chunk_size.
+   * An id missing from the result is one IGDB does not have, unless `error_out` is set: the
+   * first failed chunk stops the fetch, because whatever failed it (a token, a rate limit, the
+   * network) would fail the next one too.
+   */
+  std::unordered_map<std::string, policy::game_t> fetch_games(const std::vector<std::string> &igdb_ids, std::string &error_out);
+
   /// @brief Search IGDB by name. Used by auto-matching and by the manual picker.
   std::vector<policy::game_t> search(const std::string &name, int limit, std::string &error_out);
+
+  /**
+   * @brief Search for many titles, ten to a request through IGDB's multiquery endpoint.
+   *
+   * One slot per title, in order. A slot is nullopt when its search never ran or IGDB did not
+   * answer it, and an empty list when the search ran and found nothing. Stops at the first
+   * failed request, with `error_out` set.
+   */
+  std::vector<std::optional<std::vector<policy::game_t>>> search_many(const std::vector<std::string> &names,
+                                                                      int limit,
+                                                                      std::string &error_out);
 
   /**
    * @brief Find the IGDB game a set of store ids belongs to.
@@ -61,6 +83,18 @@ namespace igdb {
    * indexed store or IGDB knows none of them -- both are ordinary outcomes, not errors.
    */
   std::string resolve_store_ids(const std::vector<metadata::store_id_t> &ids, std::string &error_out);
+
+  /**
+   * @brief resolve_store_ids for a whole library, a few hundred store ids per request.
+   *
+   * One slot per game, in order: the IGDB id, empty when IGDB knows none of the game's store
+   * ids, or nullopt when the request that would have answered for it failed (`error_out` is
+   * then set). The first failure stops the lookup.
+   */
+  std::vector<std::optional<std::string>> resolve_store_ids_bulk(
+    const std::vector<std::vector<metadata::store_id_t>> &ids_per_game,
+    std::string &error_out
+  );
 
   /**
    * @brief Download a record's cover and hero art into the managed covers directory.

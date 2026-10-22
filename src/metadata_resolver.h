@@ -53,8 +53,9 @@ namespace metadata::resolver {
   /**
    * @brief Resolve every app under root["apps"].
    *
-   * Stops early and reports what it managed once IGDB starts refusing requests, rather than
-   * spending a library's worth of them finding out the credentials are wrong.
+   * Looks the whole library up in bulk: store ids a few hundred to a request, titles ten to a
+   * multiquery, records a few hundred to a request. Stops at the first request IGDB refuses
+   * and reports what it managed, counting the apps still waiting as failed.
    */
   summary_t resolve_all(nlohmann::json &root, bool force);
 
@@ -78,8 +79,8 @@ namespace metadata::resolver {
    * Unlike the automatic trigger this runs even with automatic resolution turned off, and
    * `force` re-fetches apps that already carry metadata. Either way it retries the apps a
    * recent pass found no match for. It returns as soon as the pass is
-   * queued: describing a library of a few hundred games takes minutes at IGDB's four requests
-   * a second, which is far longer than an HTTP request should stay open.
+   * queued: even batched, a library of a few hundred games means downloading its art, which
+   * is far longer than an HTTP request should stay open.
    */
   void request_library_pass(bool force);
 
@@ -89,9 +90,10 @@ namespace metadata::resolver {
   /**
    * @brief Stop the background worker and wait for an in-flight pass. Called at shutdown.
    *
-   * A pass checks for the stop between apps and then writes nothing, so the wait is normally
-   * one IGDB request long. It is bounded at ten seconds all the same, so a request stuck on a
-   * dead connection cannot hold shutdown; the worker then finishes on its own and exits.
+   * A pass checks for the stop between its phases and between apps, and then writes nothing,
+   * so the wait is normally one IGDB request long. It is bounded at ten seconds all the same,
+   * so a request stuck on a dead connection cannot hold shutdown; the worker then finishes on
+   * its own and exits.
    */
   void stop_background_resolve();
 

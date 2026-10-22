@@ -58,6 +58,15 @@ namespace igdb::policy {
                                     const source_map_t &sources,
                                     bool legacy_field = false);
 
+  /**
+   * @brief How many records one query may ask for, and how many ids a bulk caller packs in.
+   *
+   * IGDB caps `limit` at 500. A chunk stays well under it, because one store id can come back
+   * as more than one external_games row and a truncated answer would look like a miss.
+   */
+  inline constexpr int k_max_query_limit = 500;
+  inline constexpr std::size_t k_bulk_chunk_size = 200;
+
   /// @brief APIcalypse body fetching the full record for one or more IGDB game ids.
   std::string games_by_id_query(const std::vector<std::string> &igdb_ids);
 
@@ -67,10 +76,12 @@ namespace igdb::policy {
   /// @brief One store id resolved to the IGDB game that owns it.
   struct match_t {
     std::string igdb_id;
-    // The store's own id for the game, as IGDB spells it back. The source is not carried:
-    // the query already constrained which sources could answer, so a row that comes back
-    // for a given uid is necessarily the one that was asked for.
+    // The store's own id for the game, as IGDB spells it back.
     std::string store_id;
+    // IGDB's numeric source for that id, or -1 when the row did not say. A lookup for a single
+    // game can do without it, but a bulk lookup mixes stores, and the same uid can belong to a
+    // Steam game and to an unrelated GOG one.
+    int source {-1};
   };
 
   /// @brief Parse an external_games response. Malformed entries are dropped, not fatal.
@@ -95,6 +106,32 @@ namespace igdb::policy {
 
   /// @brief Parse a games response. Malformed entries are dropped, not fatal.
   std::vector<game_t> parse_games(const std::string &body);
+
+  /**
+   * @brief IGDB answers at most this many queries per multiquery request.
+   *
+   * A multiquery counts as one request against the rate limit, which is what makes a library
+   * of name-only games affordable: a search cannot be widened to cover several titles, but ten
+   * of them can share one request.
+   */
+  inline constexpr std::size_t k_max_multiquery = 10;
+
+  /**
+   * @brief Multiquery body running one name search per title, at most k_max_multiquery.
+   *
+   * Each sub-query is named after its index, so parse_multi_search can hand the answers back in
+   * the order the titles were given. Titles past the cap, and empty ones, get no query; their
+   * slot comes back unanswered.
+   */
+  std::string multi_search_query(const std::vector<std::string> &names, int limit);
+
+  /**
+   * @brief Split a multiquery response back into one hit list per title.
+   *
+   * The result has `count` slots. A slot IGDB did not answer stays nullopt, which is not the
+   * same as an empty list: an empty list is a search that found nothing.
+   */
+  std::vector<std::optional<std::vector<game_t>>> parse_multi_search(const std::string &body, std::size_t count);
 
   /// @brief Render a unix timestamp as the YYYY-MM-DD release date we store.
   std::string release_date_from_timestamp(std::int64_t seconds);

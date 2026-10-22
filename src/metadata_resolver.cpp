@@ -21,6 +21,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <thread>
 #include <unordered_map>
@@ -343,11 +344,32 @@ namespace metadata::resolver {
       cache.until.clear();
     }
 
+    /// @brief One app a library pass has to do something about, carried across the phases.
+    struct pending_t {
+      nlohmann::json *app {nullptr};
+      // The unmatched-cache key, set only for automatic passes over apps not yet linked.
+      std::string key;
+      std::string igdb_id;
+      // Linked and otherwise left alone, but its old JPEG art still wants replacing.
+      bool legacy_art_only {false};
+      // A name search already returned the full record, so it need not be fetched again.
+      std::optional<igdb::policy::game_t> record;
+      std::string error;
+    };
+
     /**
      * @brief The loop behind resolve_all.
      *
+     * Works in phases rather than app by app, because one app at a time costs up to three
+     * requests in a row and IGDB allows four a second: a few hundred games took minutes. Here
+     * every store id in the library goes out in a few requests, titles are searched ten to a
+     * multiquery, and every record is fetched a couple of hundred at a time, so the same
+     * library costs a handful of requests and the art downloads, which IGDB does not meter,
+     * become the slow part.
+     *
      * `automatic` is set for the background pass: it skips entries that are not games, skips
-     * apps it failed to match within the last day, and stops between apps once shutdown asks.
+     * apps it failed to match within the last day, and stops between phases and between apps
+     * once shutdown asks.
      */
     summary_t resolve_library(nlohmann::json &root, bool force, bool automatic) {
       summary_t summary;
@@ -355,15 +377,18 @@ namespace metadata::resolver {
       if (apps == root.end() || !apps->is_array()) {
         return summary;
       }
+      const auto stopping = [automatic]() {
+        return automatic && stop_requested();
+      };
+
+      std::vector<pending_t> pending;
       for (auto &app : *apps) {
         if (!app.is_object()) {
           continue;
         }
-        if (automatic && stop_requested()) {
-          break;
-        }
+        const auto existing = read_from_app(app);
         std::string key;
-        if (automatic && read_from_app(app).igdb_id.empty()) {
+        if (automatic && existing.igdb_id.empty()) {
           if (!is_game_entry(app)) {
             continue;
           }
@@ -375,37 +400,158 @@ namespace metadata::resolver {
           }
         }
         ++summary.considered;
-        const auto outcome = resolve_app(app, force);
-        if (outcome.skipped_locked) {
+        const bool locked = existing.locked && !force;
+        if (locked) {
           ++summary.skipped;
-          // Skipped for its metadata, but it may still have had old art replaced.
-          summary.changed = summary.changed || outcome.changed;
+        }
+        // Locked, or already described by IGDB and not asked to refresh: no request is spent
+        // on it, except to replace old JPEG art once.
+        if (locked || (!force && existing.source == "igdb" && existing.present)) {
+          if (!existing.igdb_id.empty() && has_legacy_igdb_art(app)) {
+            pending.push_back({&app, {}, existing.igdb_id, true, std::nullopt, {}});
+          }
           continue;
         }
-        if (!outcome.error.empty()) {
+        pending.push_back({&app, std::move(key), existing.igdb_id, false, std::nullopt, {}});
+      }
+
+      // Set once a phase fails. Whatever failed it (a token, a rate limit, the network) would
+      // fail the next phase too, so the rest are skipped and the apps still waiting on them
+      // count as failed rather than as unmatched.
+      std::string network_error;
+      const auto fail_unanswered = [&network_error](pending_t &entry) {
+        entry.error = network_error;
+      };
+
+      // Store ids first: a Steam or GOG id is an exact answer, where a title is a guess.
+      if (!stopping()) {
+        std::vector<pending_t *> asking;
+        std::vector<std::vector<store_id_t>> ids;
+        for (auto &entry : pending) {
+          if (entry.legacy_art_only || !entry.igdb_id.empty()) {
+            continue;
+          }
+          auto store_ids = store_ids_of(*entry.app);
+          if (!store_ids.empty()) {
+            asking.push_back(&entry);
+            ids.push_back(std::move(store_ids));
+          }
+        }
+        if (!asking.empty()) {
+          std::string error;
+          const auto answers = igdb::resolve_store_ids_bulk(ids, error);
+          if (!error.empty()) {
+            network_error = error;
+          }
+          for (std::size_t index = 0; index < asking.size(); ++index) {
+            if (!answers[index]) {
+              fail_unanswered(*asking[index]);
+            } else {
+              asking[index]->igdb_id = *answers[index];
+            }
+          }
+        }
+      }
+
+      // Then titles, for apps with no store id IGDB indexes, when the user allows guessing.
+      if (network_error.empty() && config::igdb.allow_name_match && !stopping()) {
+        std::vector<pending_t *> asking;
+        std::vector<std::string> names;
+        for (auto &entry : pending) {
+          if (entry.legacy_art_only || !entry.igdb_id.empty() || !entry.error.empty()) {
+            continue;
+          }
+          auto name = app_name(*entry.app);
+          if (!name.empty()) {
+            asking.push_back(&entry);
+            names.push_back(std::move(name));
+          }
+        }
+        if (!asking.empty()) {
+          std::string error;
+          const auto answers = igdb::search_many(names, 10, error);
+          if (!error.empty()) {
+            network_error = error;
+          }
+          for (std::size_t index = 0; index < asking.size(); ++index) {
+            auto &entry = *asking[index];
+            if (!answers[index]) {
+              fail_unanswered(entry);
+              continue;
+            }
+            // A release date the launcher already supplied is what tells a remake from the
+            // original.
+            const auto year = igdb::policy::year_from_date(read_from_app(*entry.app).release_date);
+            if (auto best = igdb::policy::best_name_match(*answers[index], names[index], year)) {
+              entry.igdb_id = best->igdb_id;
+              entry.record = std::move(best);
+            }
+          }
+        }
+      }
+
+      // Then the records themselves, for every app that has an id but not yet its record.
+      std::unordered_map<std::string, igdb::policy::game_t> records;
+      if (network_error.empty() && !stopping()) {
+        std::vector<std::string> wanted;
+        for (const auto &entry : pending) {
+          if (!entry.igdb_id.empty() && !entry.record && entry.error.empty()) {
+            wanted.push_back(entry.igdb_id);
+          }
+        }
+        if (!wanted.empty()) {
+          std::string error;
+          records = igdb::fetch_games(wanted, error);
+          if (!error.empty()) {
+            network_error = error;
+          }
+        }
+      }
+
+      for (auto &entry : pending) {
+        if (stopping()) {
+          break;
+        }
+        auto &app = *entry.app;
+        if (entry.error.empty() && !entry.igdb_id.empty() && !entry.record) {
+          if (const auto found = records.find(entry.igdb_id); found != records.end()) {
+            entry.record = found->second;
+          } else if (!network_error.empty()) {
+            entry.error = network_error;
+          } else if (!entry.legacy_art_only) {
+            entry.error = "IGDB has no game with id " + entry.igdb_id;
+          }
+        }
+        if (entry.legacy_art_only) {
+          // Skipped for its metadata, but it may still have its old art replaced.
+          if (entry.record && replace_legacy_art(app, *entry.record)) {
+            summary.changed = true;
+          }
+          continue;
+        }
+        if (!entry.error.empty()) {
           ++summary.failed;
           if (summary.error.empty()) {
-            summary.error = outcome.error;
-          }
-          // One failure is a game IGDB does not know; a run of them is a broken token or a
-          // rate limit, and grinding through the rest of the library would only make it worse.
-          if (summary.failed >= 5) {
-            BOOST_LOG(warning) << "Metadata resolve: giving up after " << summary.failed
-                               << " failures, last was: " << summary.error;
-            break;
+            summary.error = entry.error;
           }
           continue;
         }
-        if (outcome.changed) {
-          ++summary.matched;
-          summary.changed = true;
-        } else if (outcome.igdb_id.empty()) {
+        if (entry.igdb_id.empty()) {
           ++summary.unmatched;
           // A clean miss, not an error: an error says nothing about whether a match exists.
-          if (!key.empty()) {
-            remember_unmatched(key);
+          if (!entry.key.empty()) {
+            remember_unmatched(entry.key);
           }
+          continue;
         }
+        if (apply_record(app, *entry.record)) {
+          ++summary.matched;
+          summary.changed = true;
+        }
+      }
+      if (!network_error.empty()) {
+        BOOST_LOG(warning) << "Metadata resolve: IGDB stopped answering, " << summary.failed
+                           << " apps left for the next pass: " << network_error;
       }
       return summary;
     }

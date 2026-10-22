@@ -269,3 +269,75 @@ TEST(IgdbPolicy, BuildsImageUrls) {
             "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/co2lbd.jpg");
   EXPECT_TRUE(igdb::policy::image_url("", "t_1080p").empty());
 }
+
+TEST(IgdbPolicy, AnExternalLookupAsksForTheSourceBack) {
+  const auto query = igdb::policy::external_lookup_query({{"steam", "570"}}, igdb::policy::legacy_source_map());
+  EXPECT_NE(query.find("fields game,uid,external_game_source;"), std::string::npos);
+  const auto legacy = igdb::policy::external_lookup_query({{"steam", "570"}}, igdb::policy::legacy_source_map(), true);
+  EXPECT_NE(legacy.find("fields game,uid,category;"), std::string::npos);
+}
+
+TEST(IgdbPolicy, ABulkLookupRaisesItsLimitToFitTheBatch) {
+  std::vector<metadata::store_id_t> ids;
+  for (int index = 0; index < 200; ++index) {
+    ids.push_back({"steam", std::to_string(index + 1)});
+  }
+  const auto query = igdb::policy::external_lookup_query(ids, igdb::policy::legacy_source_map());
+  // One store id can have several rows; a limit at the batch size would truncate silently.
+  EXPECT_NE(query.find("limit 400;"), std::string::npos);
+}
+
+TEST(IgdbPolicy, ABulkFetchByIdAsksForEveryRecordItNames) {
+  std::vector<std::string> ids;
+  for (int index = 0; index < 120; ++index) {
+    ids.push_back(std::to_string(index + 1));
+  }
+  EXPECT_NE(igdb::policy::games_by_id_query(ids).find("limit 120;"), std::string::npos);
+  EXPECT_NE(igdb::policy::games_by_id_query({"1"}).find("limit 50;"), std::string::npos);
+}
+
+TEST(IgdbPolicy, ParsesTheSourceOfAnExternalMatch) {
+  const auto matches = igdb::policy::parse_external_matches(
+    R"([{"game": 1020, "uid": "570", "external_game_source": 1},
+        {"game": 7, "uid": "570", "category": 5},
+        {"game": 9, "uid": "42"}])");
+  ASSERT_EQ(matches.size(), 3u);
+  EXPECT_EQ(matches[0].source, 1);
+  EXPECT_EQ(matches[1].source, 5);
+  EXPECT_EQ(matches[2].source, -1);
+}
+
+TEST(IgdbPolicy, AMultiquerySearchesEachTitleUnderItsIndex) {
+  const auto query = igdb::policy::multi_search_query({"Portal", "", "Half-Life \"2\""}, 10);
+  EXPECT_NE(query.find("query games \"0\" { search \"Portal\";"), std::string::npos);
+  // An empty title gets no query at all, rather than one IGDB would reject.
+  EXPECT_EQ(query.find("query games \"1\""), std::string::npos);
+  EXPECT_NE(query.find("query games \"2\" { search \"Half-Life \\\"2\\\"\";"), std::string::npos);
+  EXPECT_NE(query.find("where version_parent = null; limit 10; };"), std::string::npos);
+}
+
+TEST(IgdbPolicy, AMultiqueryNeverExceedsWhatIgdbAnswers) {
+  std::vector<std::string> names(igdb::policy::k_max_multiquery + 3, "Doom");
+  const auto query = igdb::policy::multi_search_query(names, 5);
+  EXPECT_NE(query.find("query games \"9\""), std::string::npos);
+  EXPECT_EQ(query.find("query games \"10\""), std::string::npos);
+}
+
+TEST(IgdbPolicy, SplitsAMultiqueryAnswerBackPerTitle) {
+  const std::string body = R"([
+    {"name": "2", "result": [{"id": 72, "name": "Portal 2"}]},
+    {"name": "0", "result": []},
+    {"name": "7", "result": [{"id": 1, "name": "Out of range"}]},
+    {"name": "x", "result": [{"id": 2, "name": "Not ours"}]}
+  ])";
+  const auto answers = igdb::policy::parse_multi_search(body, 3);
+  ASSERT_EQ(answers.size(), 3u);
+  // Answered with nothing found is not the same as never answered.
+  ASSERT_TRUE(answers[0].has_value());
+  EXPECT_TRUE(answers[0]->empty());
+  EXPECT_FALSE(answers[1].has_value());
+  ASSERT_TRUE(answers[2].has_value());
+  ASSERT_EQ(answers[2]->size(), 1u);
+  EXPECT_EQ(answers[2]->front().igdb_id, "72");
+  EXPECT_FALSE(igdb::policy::parse_multi_search("garbage", 2)[0].has_value());
+}

@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <system_error>
 #include <thread>
@@ -344,6 +345,24 @@ namespace igdb {
       }
     }
 
+    /// @brief Cache every record in a raw games array, so a later fetch by id costs no request.
+    void cache_raw_games(const nlohmann::json &raw) {
+      if (!raw.is_array()) {
+        return;
+      }
+      for (const auto &entry : raw) {
+        if (entry.is_object() && entry.contains("id") && entry["id"].is_number_integer()) {
+          write_cached_record(std::to_string(entry["id"].get<std::int64_t>()), entry);
+        }
+      }
+    }
+
+    bool is_numeric_id(const std::string &id) {
+      return !id.empty() && std::all_of(id.begin(), id.end(), [](unsigned char character) {
+        return std::isdigit(character) != 0;
+      });
+    }
+
     std::string download_image(const std::string &image_id, std::string_view size,
                                const std::filesystem::path &destination) {
       if (image_id.empty()) {
@@ -472,41 +491,56 @@ namespace igdb {
     return ok;
   }
 
+  std::unordered_map<std::string, policy::game_t> fetch_games(const std::vector<std::string> &igdb_ids, std::string &error_out) {
+    std::unordered_map<std::string, policy::game_t> out;
+    std::vector<std::string> missing;
+    for (const auto &id : igdb_ids) {
+      // Checked before the id names a cache file: it arrives from the API and from apps.json,
+      // and only digits keep it from naming a path outside the cache.
+      if (!is_numeric_id(id) || out.contains(id) ||
+          std::find(missing.begin(), missing.end(), id) != missing.end()) {
+        continue;
+      }
+      if (auto cached = read_cached_record(id)) {
+        out.emplace(id, std::move(*cached));
+      } else {
+        missing.push_back(id);
+      }
+    }
+    for (std::size_t start = 0; start < missing.size(); start += policy::k_bulk_chunk_size) {
+      const auto end = std::min(missing.size(), start + policy::k_bulk_chunk_size);
+      const std::vector<std::string> chunk {missing.begin() + start, missing.begin() + end};
+      const auto body = request("games", policy::games_by_id_query(chunk), error_out);
+      if (!body) {
+        break;
+      }
+      cache_raw_games(nlohmann::json::parse(*body, nullptr, false));
+      for (auto &game : policy::parse_games(*body)) {
+        auto id = game.igdb_id;
+        out.emplace(std::move(id), std::move(game));
+      }
+    }
+    return out;
+  }
+
   std::optional<policy::game_t> fetch_game(const std::string &igdb_id, std::string &error_out) {
     if (igdb_id.empty()) {
       error_out = "No IGDB id";
       return std::nullopt;
     }
-    // Checked before the id names a cache file: it arrives from the API and from apps.json,
-    // and only digits keep it from naming a path outside the cache.
-    if (!std::all_of(igdb_id.begin(), igdb_id.end(), [](unsigned char character) {
-          return std::isdigit(character) != 0;
-        })) {
+    if (!is_numeric_id(igdb_id)) {
       error_out = "Not a usable IGDB id";
       return std::nullopt;
     }
-    if (auto cached = read_cached_record(igdb_id)) {
-      return cached;
-    }
-    const auto query = policy::games_by_id_query({igdb_id});
-    if (query.empty()) {
-      error_out = "Not a usable IGDB id";
+    auto games = fetch_games({igdb_id}, error_out);
+    const auto found = games.find(igdb_id);
+    if (found == games.end()) {
+      if (error_out.empty()) {
+        error_out = "IGDB has no game with id " + igdb_id;
+      }
       return std::nullopt;
     }
-    const auto body = request("games", query, error_out);
-    if (!body) {
-      return std::nullopt;
-    }
-    auto games = policy::parse_games(*body);
-    if (games.empty()) {
-      error_out = "IGDB has no game with id " + igdb_id;
-      return std::nullopt;
-    }
-    const auto raw = nlohmann::json::parse(*body, nullptr, false);
-    if (raw.is_array() && !raw.empty()) {
-      write_cached_record(igdb_id, raw.front());
-    }
-    return games.front();
+    return std::move(found->second);
   }
 
   std::vector<policy::game_t> search(const std::string &name, int limit, std::string &error_out) {
@@ -519,17 +553,48 @@ namespace igdb {
     if (!body) {
       return {};
     }
-    auto games = policy::parse_games(*body);
     // Search results are cached individually so picking one in the editor costs no request.
-    const auto raw = nlohmann::json::parse(*body, nullptr, false);
-    if (raw.is_array()) {
-      for (const auto &entry : raw) {
-        if (entry.is_object() && entry.contains("id")) {
-          write_cached_record(std::to_string(entry["id"].get<std::int64_t>()), entry);
+    cache_raw_games(nlohmann::json::parse(*body, nullptr, false));
+    return policy::parse_games(*body);
+  }
+
+  std::vector<std::optional<std::vector<policy::game_t>>> search_many(const std::vector<std::string> &names,
+                                                                      int limit,
+                                                                      std::string &error_out) {
+    std::vector<std::optional<std::vector<policy::game_t>>> out(names.size());
+    for (std::size_t start = 0; start < names.size(); start += policy::k_max_multiquery) {
+      const auto end = std::min(names.size(), start + policy::k_max_multiquery);
+      const std::vector<std::string> chunk {names.begin() + start, names.begin() + end};
+      const auto query = policy::multi_search_query(chunk, limit);
+      if (query.empty()) {
+        // Every title in the chunk was empty: nothing to search, and nothing found.
+        for (auto index = start; index < end; ++index) {
+          out[index].emplace();
+        }
+        continue;
+      }
+      const auto body = request("multiquery", query, error_out);
+      if (!body) {
+        break;
+      }
+      const auto parsed = nlohmann::json::parse(*body, nullptr, false);
+      if (parsed.is_array()) {
+        for (const auto &entry : parsed) {
+          if (entry.is_object() && entry.contains("result")) {
+            cache_raw_games(entry["result"]);
+          }
+        }
+      }
+      auto answers = policy::parse_multi_search(*body, chunk.size());
+      for (std::size_t offset = 0; offset < answers.size(); ++offset) {
+        if (answers[offset]) {
+          out[start + offset] = std::move(answers[offset]);
+        } else if (chunk[offset].empty()) {
+          out[start + offset].emplace();
         }
       }
     }
-    return games;
+    return out;
   }
 
   namespace {
@@ -586,50 +651,111 @@ namespace igdb {
     }
   }  // namespace
 
-  std::string resolve_store_ids(const std::vector<metadata::store_id_t> &ids, std::string &error_out) {
+  std::vector<std::optional<std::string>> resolve_store_ids_bulk(
+    const std::vector<std::vector<metadata::store_id_t>> &ids_per_game,
+    std::string &error_out
+  ) {
+    // Every game starts answered with "no match": a game with no indexed store id has nothing
+    // to ask, and that is an answer, not a failure.
+    std::vector<std::optional<std::string>> out(ids_per_game.size(), std::string {});
     auto &s = state();
     {
       std::scoped_lock lock {s.mutex};
       if (!s.external_lookup_supported) {
-        return {};
+        return out;
       }
     }
     bool legacy = false;
     const auto sources = ensure_sources(legacy, error_out);
     // A failure to read the sources is not itself a failure to match: the fallback map is in
     // hand either way, so the error from that request must not reach the caller as this
-    // game's error.
+    // lookup's error.
     error_out.clear();
 
-    const auto query = policy::external_lookup_query(ids, sources, legacy);
-    if (query.empty()) {
-      // No store IGDB indexes. Not an error: the caller falls back to a name search.
-      return {};
-    }
-    const auto body = request("external_games", query, error_out);
-    if (!body) {
-      // Only the retired category field is expected to be refused outright, and then it will
-      // be refused for every game. A 400 on the current field is about this query, not about
-      // store-id matching as a whole. Either way save_secret and verify turn lookups back on.
-      if (legacy && error_out.find("HTTP 400") != std::string::npos) {
-        std::scoped_lock lock {s.mutex};
-        s.external_lookup_supported = false;
-        BOOST_LOG(warning) << "IGDB: external_games lookups rejected, falling back to name matching";
+    // Every distinct store id IGDB can answer for, with the games that carry it. Two entries of
+    // the same game, from two launchers, ask once.
+    struct asked_t {
+      metadata::store_id_t id;
+      int source;
+      std::vector<std::size_t> games;
+    };
+
+    std::vector<asked_t> asked;
+    std::map<std::pair<int, std::string>, std::size_t> index_of;
+    for (std::size_t game = 0; game < ids_per_game.size(); ++game) {
+      for (const auto &id : ids_per_game[game]) {
+        const auto source = sources.find(id.store);
+        if (source == sources.end() || id.id.empty()) {
+          continue;
+        }
+        const auto [slot, inserted] = index_of.emplace(std::pair {source->second, id.id}, asked.size());
+        if (inserted) {
+          asked.push_back({id, source->second, {}});
+        }
+        asked[slot->second].games.push_back(game);
       }
-      return {};
     }
-    const auto matches = policy::parse_external_matches(*body);
-    // Ids are handed over most specific first, so the first one IGDB answered for is the best
-    // match. The query already constrained which source could answer for each uid, so
-    // comparing the uid alone cannot pick up another store's game.
-    for (const auto &id : ids) {
-      for (const auto &match : matches) {
-        if (match.store_id == id.id) {
-          return match.igdb_id;
+
+    // What IGDB answered, by source and uid.
+    std::map<std::pair<int, std::string>, std::string> found;
+    std::size_t answered_up_to = 0;
+    for (std::size_t start = 0; start < asked.size(); start += policy::k_bulk_chunk_size) {
+      const auto end = std::min(asked.size(), start + policy::k_bulk_chunk_size);
+      std::vector<metadata::store_id_t> chunk;
+      chunk.reserve(end - start);
+      for (auto index = start; index < end; ++index) {
+        chunk.push_back(asked[index].id);
+      }
+      const auto body = request("external_games", policy::external_lookup_query(chunk, sources, legacy), error_out);
+      if (!body) {
+        // Only the retired category field is expected to be refused outright, and then it will
+        // be refused for every game. A 400 on the current field is about this query, not about
+        // store-id matching as a whole. Either way save_secret and verify turn lookups back on.
+        if (legacy && error_out.find("HTTP 400") != std::string::npos) {
+          std::scoped_lock lock {s.mutex};
+          s.external_lookup_supported = false;
+          BOOST_LOG(warning) << "IGDB: external_games lookups rejected, falling back to name matching";
+          // Not a failure of these games: name matching is now their only way in.
+          error_out.clear();
+          return out;
+        }
+        break;
+      }
+      for (const auto &match : policy::parse_external_matches(*body)) {
+        found.emplace(std::pair {match.source, match.store_id}, match.igdb_id);
+      }
+      answered_up_to = end;
+    }
+
+    // A game whose ids were not all asked about cannot be called unmatched.
+    for (auto index = answered_up_to; index < asked.size(); ++index) {
+      for (const auto game : asked[index].games) {
+        out[game].reset();
+      }
+    }
+    for (std::size_t game = 0; game < ids_per_game.size(); ++game) {
+      if (!out[game]) {
+        continue;
+      }
+      // Ids are handed over most specific first, so the first one IGDB answered for is the
+      // best match.
+      for (const auto &id : ids_per_game[game]) {
+        const auto source = sources.find(id.store);
+        if (source == sources.end()) {
+          continue;
+        }
+        if (const auto match = found.find({source->second, id.id}); match != found.end()) {
+          out[game] = match->second;
+          break;
         }
       }
     }
-    return matches.empty() ? std::string {} : matches.front().igdb_id;
+    return out;
+  }
+
+  std::string resolve_store_ids(const std::vector<metadata::store_id_t> &ids, std::string &error_out) {
+    const auto answers = resolve_store_ids_bulk({ids}, error_out);
+    return answers.front().value_or(std::string {});
   }
 
   std::string download_cover(const policy::game_t &game, const std::filesystem::path &covers_root) {

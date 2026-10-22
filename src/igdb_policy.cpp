@@ -58,6 +58,16 @@ namespace igdb::policy {
       "goty",
     };
 
+    // Every query that returns games asks for the same fields, so parse_games sees one shape.
+    constexpr const char *k_game_fields =
+      "fields id,name,summary,first_release_date,rating,aggregated_rating,"
+      "genres.name,cover.image_id,artworks.image_id,"
+      "involved_companies.developer,involved_companies.publisher,involved_companies.company.name; ";
+
+    const char *source_field(bool legacy_field) {
+      return legacy_field ? "category" : "external_game_source";
+    }
+
     std::string escape_apicalypse(const std::string &value) {
       std::string out;
       out.reserve(value.size() + 8);
@@ -186,6 +196,7 @@ namespace igdb::policy {
                                     bool legacy_field) {
     std::ostringstream clauses;
     bool first = true;
+    std::size_t asked = 0;
     for (const auto &id : ids) {
       const auto source = sources.find(id.store);
       if (source == sources.end() || id.id.empty()) {
@@ -195,20 +206,26 @@ namespace igdb::policy {
         clauses << " | ";
       }
       first = false;
+      ++asked;
       clauses << "(uid = \"" << escape_apicalypse(id.id) << "\" & "
-              << (legacy_field ? "category" : "external_game_source") << " = " << source->second << ")";
+              << source_field(legacy_field) << " = " << source->second << ")";
     }
     if (first) {
       return {};
     }
+    // The source comes back so a lookup that mixes stores can tell which store each row
+    // answers for. Twice the ids asked, because one store id can have several rows.
+    const auto limit = std::clamp(static_cast<int>(asked) * 2, 50, k_max_query_limit);
     std::ostringstream query;
-    query << "fields game,uid; where " << clauses.str() << "; limit 50;";
+    query << "fields game,uid," << source_field(legacy_field) << "; where " << clauses.str()
+          << "; limit " << limit << ";";
     return query.str();
   }
 
   std::string games_by_id_query(const std::vector<std::string> &igdb_ids) {
     std::ostringstream list;
     bool first = true;
+    int count = 0;
     for (const auto &id : igdb_ids) {
       if (id.empty() || id.find_first_not_of("0123456789") != std::string::npos) {
         continue;
@@ -217,16 +234,15 @@ namespace igdb::policy {
         list << ',';
       }
       first = false;
+      ++count;
       list << id;
     }
     if (first) {
       return {};
     }
     std::ostringstream query;
-    query << "fields id,name,summary,first_release_date,rating,aggregated_rating,"
-             "genres.name,cover.image_id,artworks.image_id,"
-             "involved_companies.developer,involved_companies.publisher,involved_companies.company.name; "
-          << "where id = (" << list.str() << "); limit 50;";
+    query << k_game_fields << "where id = (" << list.str() << "); limit "
+          << std::clamp(count, 50, k_max_query_limit) << ";";
     return query.str();
   }
 
@@ -238,10 +254,7 @@ namespace igdb::policy {
     std::ostringstream query;
     // `search` already orders by relevance, so no sort clause. Versions and DLC are excluded:
     // a library entry is the game itself, never an expansion record that shares its name.
-    query << "search \"" << escape_apicalypse(name) << "\"; "
-          << "fields id,name,summary,first_release_date,rating,aggregated_rating,"
-             "genres.name,cover.image_id,artworks.image_id,"
-             "involved_companies.developer,involved_companies.publisher,involved_companies.company.name; "
+    query << "search \"" << escape_apicalypse(name) << "\"; " << k_game_fields
           << "where version_parent = null; limit " << capped << ";";
     return query.str();
   }
@@ -259,6 +272,13 @@ namespace igdb::policy {
       match_t match;
       match.igdb_id = json_id(entry, "game");
       match.store_id = json_string(entry, "uid");
+      // Whichever of the two fields the query filtered on is the one that comes back.
+      for (const char *field : {"external_game_source", "category"}) {
+        if (const auto source = json_id(entry, field); !source.empty() && source.size() < 10) {
+          match.source = std::stoi(source);
+          break;
+        }
+      }
       if (match.igdb_id.empty()) {
         continue;
       }
@@ -267,8 +287,101 @@ namespace igdb::policy {
     return out;
   }
 
+  namespace {
+    std::vector<game_t> parse_games_node(const nlohmann::json &parsed) {
+      std::vector<game_t> out;
+      if (!parsed.is_array()) {
+        return out;
+      }
+      for (const auto &entry : parsed) {
+        if (!entry.is_object()) {
+          continue;
+        }
+        game_t game;
+        game.igdb_id = json_id(entry, "id");
+        if (game.igdb_id.empty()) {
+          continue;
+        }
+        game.name = json_string(entry, "name");
+        game.summary = json_string(entry, "summary");
+        if (auto it = entry.find("first_release_date"); it != entry.end() && it->is_number_integer()) {
+          game.first_release_date = it->get<std::int64_t>();
+        }
+        // IGDB separates the players' score from the press'. We keep both, under the names the
+        // rest of the host already uses for Playnite's equivalents.
+        game.community_score = json_score(entry, "rating");
+        game.critic_score = json_score(entry, "aggregated_rating");
+        if (auto it = entry.find("genres"); it != entry.end() && it->is_array()) {
+          for (const auto &genre : *it) {
+            auto name = genre.is_object() ? json_string(genre, "name") : std::string {};
+            if (!name.empty()) {
+              game.genres.push_back(std::move(name));
+            }
+          }
+        }
+        if (auto it = entry.find("cover"); it != entry.end() && it->is_object()) {
+          game.cover_image_id = json_string(*it, "image_id");
+        }
+        if (auto it = entry.find("artworks"); it != entry.end() && it->is_array()) {
+          for (const auto &artwork : *it) {
+            auto image = artwork.is_object() ? json_string(artwork, "image_id") : std::string {};
+            if (!image.empty()) {
+              game.artwork_image_id = std::move(image);
+              break;
+            }
+          }
+        }
+        if (auto it = entry.find("involved_companies"); it != entry.end() && it->is_array()) {
+          for (const auto &involved : *it) {
+            if (!involved.is_object()) {
+              continue;
+            }
+            std::string company;
+            if (auto company_it = involved.find("company");
+                company_it != involved.end() && company_it->is_object()) {
+              company = json_string(*company_it, "name");
+            }
+            if (company.empty()) {
+              continue;
+            }
+            const auto flag = [&involved](const char *key) {
+              auto it = involved.find(key);
+              return it != involved.end() && it->is_boolean() && it->get<bool>();
+            };
+            // A studio that both made and shipped a game appears in both lists, which is what
+            // the Playnite-fed fields did too, so clients need no new handling.
+            if (flag("developer")) {
+              game.developers.push_back(company);
+            }
+            if (flag("publisher")) {
+              game.publishers.push_back(company);
+            }
+          }
+        }
+        out.push_back(std::move(game));
+      }
+      return out;
+    }
+  }  // namespace
+
   std::vector<game_t> parse_games(const std::string &body) {
-    std::vector<game_t> out;
+    return parse_games_node(nlohmann::json::parse(body, nullptr, false));
+  }
+
+  std::string multi_search_query(const std::vector<std::string> &names, int limit) {
+    std::ostringstream query;
+    for (std::size_t index = 0; index < names.size() && index < k_max_multiquery; ++index) {
+      const auto search = search_query(names[index], limit);
+      if (search.empty()) {
+        continue;
+      }
+      query << "query games \"" << index << "\" { " << search << " };\n";
+    }
+    return query.str();
+  }
+
+  std::vector<std::optional<std::vector<game_t>>> parse_multi_search(const std::string &body, std::size_t count) {
+    std::vector<std::optional<std::vector<game_t>>> out(count);
     const auto parsed = nlohmann::json::parse(body, nullptr, false);
     if (!parsed.is_array()) {
       return out;
@@ -277,68 +390,16 @@ namespace igdb::policy {
       if (!entry.is_object()) {
         continue;
       }
-      game_t game;
-      game.igdb_id = json_id(entry, "id");
-      if (game.igdb_id.empty()) {
+      const auto name = json_string(entry, "name");
+      if (name.empty() || name.find_first_not_of("0123456789") != std::string::npos || name.size() > 4) {
         continue;
       }
-      game.name = json_string(entry, "name");
-      game.summary = json_string(entry, "summary");
-      if (auto it = entry.find("first_release_date"); it != entry.end() && it->is_number_integer()) {
-        game.first_release_date = it->get<std::int64_t>();
+      const auto index = static_cast<std::size_t>(std::stoul(name));
+      auto result = entry.find("result");
+      if (index >= count || result == entry.end() || !result->is_array()) {
+        continue;
       }
-      // IGDB separates the players' score from the press'. We keep both, under the names the
-      // rest of the host already uses for Playnite's equivalents.
-      game.community_score = json_score(entry, "rating");
-      game.critic_score = json_score(entry, "aggregated_rating");
-      if (auto it = entry.find("genres"); it != entry.end() && it->is_array()) {
-        for (const auto &genre : *it) {
-          auto name = genre.is_object() ? json_string(genre, "name") : std::string {};
-          if (!name.empty()) {
-            game.genres.push_back(std::move(name));
-          }
-        }
-      }
-      if (auto it = entry.find("cover"); it != entry.end() && it->is_object()) {
-        game.cover_image_id = json_string(*it, "image_id");
-      }
-      if (auto it = entry.find("artworks"); it != entry.end() && it->is_array()) {
-        for (const auto &artwork : *it) {
-          auto image = artwork.is_object() ? json_string(artwork, "image_id") : std::string {};
-          if (!image.empty()) {
-            game.artwork_image_id = std::move(image);
-            break;
-          }
-        }
-      }
-      if (auto it = entry.find("involved_companies"); it != entry.end() && it->is_array()) {
-        for (const auto &involved : *it) {
-          if (!involved.is_object()) {
-            continue;
-          }
-          std::string company;
-          if (auto company_it = involved.find("company");
-              company_it != involved.end() && company_it->is_object()) {
-            company = json_string(*company_it, "name");
-          }
-          if (company.empty()) {
-            continue;
-          }
-          const auto flag = [&involved](const char *key) {
-            auto it = involved.find(key);
-            return it != involved.end() && it->is_boolean() && it->get<bool>();
-          };
-          // A studio that both made and shipped a game appears in both lists, which is what
-          // the Playnite-fed fields did too, so clients need no new handling.
-          if (flag("developer")) {
-            game.developers.push_back(company);
-          }
-          if (flag("publisher")) {
-            game.publishers.push_back(company);
-          }
-        }
-      }
-      out.push_back(std::move(game));
+      out[index] = parse_games_node(*result);
     }
     return out;
   }
