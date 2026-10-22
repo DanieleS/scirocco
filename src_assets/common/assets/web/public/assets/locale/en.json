@@ -942,6 +942,8 @@
     "ping_timeout_desc": "How long to wait in milliseconds for data from moonlight before shutting down the stream",
     "video_max_batch_size_kb": "Max Video Batch Size",
     "video_max_batch_size_kb_desc": "Maximum size in KiB for each outgoing video send batch. The default is 64 KiB. Lower values can improve stream stability on cheaper switches, routers, and Wi-Fi gear, at the cost of less than 1 ms of extra host-side delay. PyroWave resolves its batch size automatically.",
+    "pacing_batch_demand_limit": "Demand-Based Video Batch Size (Experimental)",
+    "pacing_batch_demand_limit_desc": "Sizes each outgoing video send call from the negotiated bitrate and the FEC-expanded frame demand, instead of always using the maximum batch size. Pacing and its bitrate ceiling are unchanged. It may increase host-side send work. PyroWave is unchanged. Off by default.",
     "pyrowave_critical_fec_percentage": "PyroWave Critical FEC Percentage",
     "pyrowave_critical_fec_percentage_desc": "Error correction for the first few percent of each PyroWave frame, which carries its coarsest detail. Losing any of it drops the whole frame, while a loss elsewhere only blurs a small area for one frame, so only these packets get error correction packets, at least 2 per frame. 20 (default) costs well under 1% of the bitrate. 0 disables it, allowing larger frames. The FEC Percentage setting does not apply to PyroWave.",
     "pkey": "Private Key",
