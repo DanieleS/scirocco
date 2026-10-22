@@ -1052,6 +1052,7 @@ namespace config {
     false,  // enable input only mode
     true,  // forward_rumble
     false,  // focus_hints
+    capture_action::provider_t::gamebar,  // capture_provider
   };
 
   frame_limiter_t frame_limiter {
@@ -2316,6 +2317,17 @@ namespace config {
     bool_f(vars, "legacy_ordering", sunshine.legacy_ordering);
     bool_f(vars, "forward_rumble", input.forward_rumble);
     bool_f(vars, "focus_hints", input.focus_hints);
+    {
+      std::string capture_provider;
+      string_f(vars, "capture_provider", capture_provider);
+      if (!capture_provider.empty()) {
+        if (const auto provider = capture_action::parse_provider(capture_provider)) {
+          input.capture_provider = *provider;
+        } else {
+          BOOST_LOG(warning) << "config: unknown capture_provider value: "sv << capture_provider;
+        }
+      }
+    }
 
     int port = sunshine.port;
     int_between_f(vars, "port"s, port, {1024 + nvhttp::PORT_HTTPS, 65535 - rtsp_stream::RTSP_SETUP_PORT});
@@ -2754,6 +2766,7 @@ namespace config {
         "ds5_inputtino_randomize_mac",
         "proton_dualsense_compatibility",
         "dualsense_haptics_gain",
+        "capture_provider",
 
         // Stream audio/video and display automation
         "audio_sink",

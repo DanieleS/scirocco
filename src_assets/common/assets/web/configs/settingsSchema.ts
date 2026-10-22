@@ -74,6 +74,7 @@ export const clientOverrideableKeys = new Set([
   'ds5_inputtino_randomize_mac',
   'proton_dualsense_compatibility',
   'dualsense_haptics_gain',
+  'capture_provider',
   'audio_sink',
   'audio_sink_capture_only',
   'virtual_sink',
@@ -306,6 +307,12 @@ export function gamepadOptionsForPlatform(platform: string): SettingsOption[] {
       : new Set(['auto']);
   return gamepadOptions.filter((candidate) => supportedValues.has(candidate.value));
 }
+
+const captureProviderOptions = [
+  option('gamebar', 'ui.settings.options.capture_provider.gamebar'),
+  option('nvidia', 'ui.settings.options.capture_provider.nvidia'),
+  option('off', 'ui.settings.options.capture_provider.off'),
+];
 
 const frameLimiterOptions = [
   option('auto', '_common.auto'),
@@ -892,6 +899,7 @@ export const settingsCategories: SettingsCategory[] = [
           boolean('high_resolution_scrolling'),
           boolean('native_pen_touch', { platform: 'windows' }),
           boolean('focus_hints', { platform: 'windows' }),
+          select('capture_provider', captureProviderOptions, { platform: 'windows' }),
         ],
       },
       {
@@ -1231,6 +1239,7 @@ export const settingsDefaults: Record<string, unknown> = {
   high_resolution_scrolling: true,
   native_pen_touch: true,
   focus_hints: false,
+  capture_provider: 'gamebar',
   key_repeat_delay: 500,
   key_repeat_frequency: 24.9,
   install_steam_audio_drivers: true,
