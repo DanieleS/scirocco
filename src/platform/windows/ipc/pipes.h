@@ -522,6 +522,14 @@ namespace platf::dxgi {
     DWORD last_connect_error() const {
       return _last_connect_error;
     }
+    // Require client connections to terminate at the named-pipe server process
+    // launched by the caller. A non-pipe handle or a different server PID is
+    // rejected before it can participate in IPC.
+    void set_expected_server_process_id(DWORD process_id);
+
+    // Refuse to create a server when another process already owns the name.
+    // This is intentionally opt-in because some callers use multiple instances.
+    void set_first_pipe_instance_only();
 
   private:
     /**
@@ -580,6 +588,8 @@ namespace platf::dxgi {
     DWORD _client_security_flags = 0;
     bool _quiet_connect_failures = false;
     mutable DWORD _last_connect_error = 0;
+    DWORD _expected_server_process_id = 0;
+    bool _first_pipe_instance_only = false;
     SecurityDescriptorBuilder _secdesc_builder;  // optional custom SD builder (Playnite can override)
   };
 
@@ -634,6 +644,8 @@ namespace platf::dxgi {
     DWORD last_connect_error() const {
       return _pipe_factory.last_connect_error();
     }
+    void set_expected_server_process_id(DWORD process_id);
+    void set_first_pipe_instance_only();
 
   private:
     std::unique_ptr<INamedPipe> handshake_server(std::unique_ptr<INamedPipe> pipe);
