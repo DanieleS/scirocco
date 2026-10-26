@@ -1923,6 +1923,9 @@ if(Python3_Interpreter_FOUND AND SUNSHINE_TEST_GXX)
     add_test(NAME regression_remote_monitor_hdr_windows
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_remote_monitor_hdr_windows.py"
             --compiler "${CMAKE_CXX_COMPILER}")
+    add_test(NAME regression_remote_monitor_color_observation
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_remote_monitor_color_observation.py"
+            --compiler "${CMAKE_CXX_COMPILER}")
     add_test(NAME regression_selected_output_fallback
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_selected_output_fallback.py")
     add_test(NAME regression_virtual_display_refresh

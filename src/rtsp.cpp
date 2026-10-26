@@ -1038,7 +1038,7 @@ namespace rtsp_stream {
         // failure finalizer cannot synchronously reacquire that same gate.
         post([this, pending] {
           try {
-            run_startup([this, pending](bool admitted) {
+            run_startup(std::nullopt, [this, pending](bool admitted) {
               if (!admitted) {
                 // A failed terminal action can invalidate the queued ticket
                 // without reaching monitor shutdown. Retain the reconciliation
@@ -2784,7 +2784,7 @@ namespace rtsp_stream {
           // Cancellation can then find and synchronously join every started
           // session instead of racing the posted RTSP response callback.
           server->insert(stream_session, client_uuid, stream_session && stream_hdr_enabled);
-          if (pending_launch->role == remote_session::role_e::monitor) pending_launch->monitor_stream_published = true;
+          if (session->role == remote_session::role_e::monitor) session->monitor_stream_published = true;
         }
         // Ownership is published, so drop the gate before the local reference goes out of
         // scope. A failed start can hold the last reference, and ~session_t may then run

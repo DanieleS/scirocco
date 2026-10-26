@@ -222,7 +222,7 @@ namespace rtsp_stream {
     /* @MONITOR_RECONCILIATION@ */
 
     template<class F> void post(F &&fn) { posted.emplace_back(std::forward<F>(fn)); }
-    template<class F> void run_startup(F &&fn) {
+    template<class F> void run_startup(std::optional<std::array<std::uint8_t, 16>>, F &&fn) {
       startup_dispatch.submit([this](auto task) { startups.emplace_back(std::move(task)); }, std::forward<F>(fn), [] {});
     }
     void drain_monitor_reconciliation() {
