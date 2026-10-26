@@ -74,6 +74,7 @@ program = r'''
 #include <utility>
 #include <vector>
 #include "src/utility.h"
+#include "src/shutdown_phase.h"
 using namespace std::literals;
 
 std::mutex records_mutex;
@@ -92,20 +93,6 @@ namespace logging { void log_flush() { record("deadline expired"); } }
 namespace lifetime {
   constexpr int desired_exit_code = 73;
   void debug_trap() { std::_Exit(74); }
-}
-namespace shutdown_phase {
-  enum class phase_e {
-    waiting_for_shutdown_event,
-    linux_private_display_preserve,
-    termination_signal_monitor_stop,
-    http_thread_join,
-    config_thread_join,
-    rtsp_thread_join,
-  };
-  struct tracker_t {
-    void set(phase_e) {}
-    std::string_view current_name() const { return "test"; }
-  };
 }
 
 PRODUCTION_DEADLINE

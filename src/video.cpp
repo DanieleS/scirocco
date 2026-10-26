@@ -61,6 +61,9 @@ extern "C" {
 #if defined(__linux__) && defined(SUNSHINE_BUILD_CUDA)
   #include "platform/linux/cuda.h"
 #endif
+#ifdef __linux__
+  #include "platform/linux/rtx_hdr_runtime.h"
+#endif
 
 #ifdef _WIN32
   #include "src/platform/windows/display.h"
@@ -1171,6 +1174,10 @@ namespace video {
       return device->convert(img);
     }
 
+    platf::converted_frame_t converted_frame() const override {
+      return device ? device->converted_frame : platf::converted_frame_t {};
+    }
+
     void request_idr_frame() override {
       if (device && device->frame) {
         auto &frame = device->frame;
@@ -1187,9 +1194,10 @@ namespace video {
       }
     }
 
-    void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
+    bool invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
       BOOST_LOG(error) << "Encoder doesn't support reference frame invalidation";
       request_idr_frame();
+      return false;
     }
 
     void set_hdr_metadata(const SS_HDR_METADATA &metadata) override {
@@ -1268,6 +1276,10 @@ namespace video {
       return device->convert(img);
     }
 
+    platf::converted_frame_t converted_frame() const override {
+      return device ? device->converted_frame : platf::converted_frame_t {};
+    }
+
     void request_idr_frame() override {
       force_idr = true;
     }
@@ -1276,14 +1288,16 @@ namespace video {
       force_idr = false;
     }
 
-    void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
+    bool invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
       if (!device || !device->nvenc) {
-        return;
+        return false;
       }
 
       if (!device->nvenc->invalidate_ref_frames(first_frame, last_frame)) {
         force_idr = true;
+        return false;
       }
+      return true;
     }
 
     bool set_bitrate(int bitrate_kbps, bool reset_on_raise) override {
@@ -1347,10 +1361,14 @@ namespace video {
         return -1;
       }
       const auto result = device->convert(img);
-      if (result == 0) {
+      if (result == 0 && !device->converted_frame.repeats_previous) {
         fresh_conversion_pending = true;
       }
       return result;
+    }
+
+    platf::converted_frame_t converted_frame() const override {
+      return device ? device->converted_frame : platf::converted_frame_t {};
     }
 
     void request_idr_frame() override {
@@ -1363,14 +1381,16 @@ namespace video {
       // backpressure drops, so clearing it here would lose recovery IDRs.
     }
 
-    void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
+    bool invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
       if (!device || !device->amf) {
-        return;
+        return false;
       }
 
       if (!device->amf->invalidate_ref_frames(first_frame, last_frame)) {
         force_idr = true;
+        return false;
       }
+      return true;
     }
 
     bool set_bitrate(int bitrate_kbps, bool /* reset_on_raise */) override {
@@ -2794,7 +2814,7 @@ namespace video {
     state.pending_virtual_display_adapter_hint = adapter_luid;
     state.pending_virtual_display_adapter_hint_lease = lease;
     state.pending_virtual_display_adapter_hint_ready_for_verification = false;
-    BOOST_LOG(debug)
+    BOOST_LOG(verbose)
       << "Published pending virtual-display adapter identity "
       << luid_cache_identity(adapter_luid)
       << " for encoder capability matching (lease=" << lease << ").";
@@ -2825,8 +2845,8 @@ namespace video {
     state.pending_virtual_display_adapter_hint.reset();
     state.pending_virtual_display_adapter_hint_lease = 0;
     state.pending_virtual_display_adapter_hint_ready_for_verification = false;
-    BOOST_LOG(debug)
-      << "Cleared pending virtual-display adapter identity after display publication (lease="
+    BOOST_LOG(verbose)
+      << "Cleared pending virtual-display adapter identity (lease="
       << lease << ").";
     return true;
   }
@@ -2835,6 +2855,14 @@ namespace video {
   advertised_encoder_capabilities_t advertised_encoder_capabilities(
     const bool probe_before_negative,
     bool *probe_complete
+  ) {
+    return advertised_encoder_capabilities(probe_before_negative, probe_complete, nullptr);
+  }
+
+  advertised_encoder_capabilities_t advertised_encoder_capabilities(
+    const bool probe_before_negative,
+    bool *probe_complete,
+    std::string *adapter_identity
   ) {
     auto current_key = build_probe_cache_key();
     auto probe_status = encoder_probe_status_for_key(current_key);
@@ -2869,6 +2897,9 @@ namespace video {
     // when the current identity has not produced a successful probe.
     if (probe_complete) {
       *probe_complete = probe_status.successful;
+    }
+    if (adapter_identity) {
+      *adapter_identity = current_key.adapter_identity;
     }
     if (!probe_status.successful) {
       log_probe_cache_miss(current_key);
@@ -3420,8 +3451,7 @@ namespace video {
         }
 
         const auto pacing = capture_pacing_for_display();
-        if (const auto demand = capture_config_for_consumers(capture_ctxs, pacing);
-            demand && !same_capture_pacing(producer_config, *demand, pacing)) {
+        if (const auto demand = capture_config_for_consumers(capture_ctxs, pacing); demand && !same_capture_demand(producer_config, *demand, pacing)) {
           // Reuse the existing serialized teardown: all encoders release the
           // old display before its single replacement is created. This also
           // refreshes WGC admission and the capture loop's pacing state.
@@ -3890,7 +3920,7 @@ namespace video {
 #ifdef SUNSHINE_ENABLE_NV_TRUEHDR
   bool refresh_rtx_hdr_metadata_if_needed(
     config_t &config,
-    encode_session_t &encode_session,
+    encode_session_t *encode_session,
     safe::mail_raw_t::event_t<hdr_info_t> &hdr_event,
     std::optional<hdr_info_raw_t> &last_hdr_info,
     rtx_hdr_metadata_refresh_state_t &refresh_state
@@ -3930,7 +3960,7 @@ namespace video {
 
     config.rtx_hdr_peak_nits = peak_nits;
     const auto metadata = synthesize_rtx_hdr_metadata(peak_nits);
-    encode_session.set_hdr_metadata(metadata);
+    if (encode_session) encode_session->set_hdr_metadata(metadata);
     raise_hdr_info_if_changed(
       hdr_event,
       last_hdr_info,
@@ -5476,6 +5506,7 @@ namespace video {
       uint64_t pop_timeouts = 0;
       uint64_t gate_skipped = 0;
       uint64_t converted = 0;
+      uint64_t repeated_inputs = 0;
       uint64_t encoded = 0;
       uint64_t dropped_submissions = 0;
       uint64_t input_boosts = 0;
@@ -5493,6 +5524,9 @@ namespace video {
       }
     };
 
+    // A keyframe request that arrived with an input the conversion then reported as a repeat.
+    bool retry_idr = false;
+
     while (true) {
       consume_input_activity();
       raise_touch_port_if_geometry_changed(touch_port_event, disp.get(), config);
@@ -5504,6 +5538,7 @@ namespace video {
                          << " pop_timeouts=" << loop_stats.pop_timeouts
                          << " gate_skipped=" << loop_stats.gate_skipped
                          << " converted=" << loop_stats.converted
+                         << " repeated_inputs=" << loop_stats.repeated_inputs
                          << " encoded=" << loop_stats.encoded
                          << " dropped_submissions=" << loop_stats.dropped_submissions
                          << " input_boosts=" << loop_stats.input_boosts
@@ -5549,11 +5584,13 @@ namespace video {
         }
       }
 
-      bool requested_idr_frame = false;
+      bool requested_idr_frame = std::exchange(retry_idr, false);
 
       while (invalidate_ref_frames_events->peek()) {
         if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
-          session->invalidate_ref_frames(frames->first, frames->second);
+          // A failed invalidation requests an IDR inside the backend. Carry it
+          // through duplicate-input skips just like an explicit client IDR.
+          requested_idr_frame |= !session->invalidate_ref_frames(frames->first, frames->second);
         }
       }
 
@@ -5669,12 +5706,24 @@ namespace video {
             native_amf_runtime_failed = native_amf_session;
             break;
           }
+
+          // Direct WGC input reads the helper's live frame, so the conversion reports
+          // which frame it actually got. Pixels this session already sent would only
+          // repeat that frame; wait for the next capture instead.
+          const auto converted = policy::resolve_converted_input(session->converted_frame(), capture_timestamp, host_processing_timestamp);
+          if (!converted.encode) {
+            ++loop_stats.repeated_inputs;
+            // Skipping must not delay a requested keyframe until the next capture: carry
+            // it into the next iteration, which encodes the last input without waiting.
+            retry_idr = policy::retry_idr_after_repeat(converted, requested_idr_frame);
+            continue;
+          }
           ++loop_stats.converted;
 
 #ifdef SUNSHINE_ENABLE_NV_TRUEHDR
           if (refresh_rtx_hdr_metadata_if_needed(
                 config,
-                *session,
+                session.get(),
                 hdr_event,
                 last_hdr_info,
                 rtx_hdr_metadata_refresh
@@ -5690,6 +5739,12 @@ namespace video {
             consume_input_activity();
             input_boost_state.on_frame(capture_timestamp.value_or(input_boost::clock::now()));
             bootstrap_state.real_frame_seen = true;
+            // Direct WGC input can convert a newer frame than the one claimed: the
+            // converted frame's stamps replace the claimed ones, and the pacing
+            // smoothing below starts from them.
+            capture_timestamp = converted.frame_timestamp;
+            host_processing_timestamp = converted.host_processing_timestamp;
+            frame_timestamp = capture_timestamp;
             if (!encode_frame_timestamp) {
               encode_frame_timestamp = *frame_timestamp;
             }
@@ -5912,6 +5967,12 @@ namespace video {
     }
 
     if (result) {
+#ifdef __linux__
+      if (config.rtx_hdr_active && (!result->supports_rtx_hdr() || display_is_hdr)) {
+        BOOST_LOG(error) << "RTX HDR requires an SDR capture source and a CUDA/GL NVIDIA encoder on Linux.";
+        return {};
+      }
+#endif
       result->colorspace = colorspace;
       result->rtx_hdr_active = config.rtx_hdr_active;
 
@@ -6189,7 +6250,9 @@ namespace video {
             continue;
           }
 
+          bool idr_requested = false;
           if (ctx->idr_events->peek()) {
+            idr_requested = true;
             pos->session->request_idr_frame();
             ctx->idr_events->pop();
           }
@@ -6238,10 +6301,20 @@ namespace video {
               continue;
             }
 
+            // Direct WGC input: encode the frame the conversion actually read, and
+            // skip pixels this session already sent rather than repeating them.
+            const auto converted = policy::resolve_converted_input(pos->session->converted_frame(), capture_timestamp, host_processing_timestamp);
+            if (!converted.encode && !policy::retry_idr_after_repeat(converted, idr_requested)) {
+              ++pos;
+              continue;
+            }
+            // Otherwise a requested keyframe is not delayed behind the repeat: the last
+            // input is encoded as the IDR now, unstamped like the no-new-frame path.
+
 #ifdef SUNSHINE_ENABLE_NV_TRUEHDR
             if (refresh_rtx_hdr_metadata_if_needed(
                   ctx->config,
-                  *pos->session,
+                  pos->session.get(),
                   ctx->hdr_events,
                   ctx->last_hdr_info,
                   ctx->rtx_hdr_metadata_refresh
@@ -6254,6 +6327,8 @@ namespace video {
 
             if (!placeholder_input) {
               pos->bootstrap.real_frame_seen = true;
+              capture_timestamp = converted.frame_timestamp;
+              host_processing_timestamp = converted.host_processing_timestamp;
               frame_timestamp = capture_timestamp;
             }
           } else {
@@ -6388,18 +6463,21 @@ namespace video {
    * @brief Stream colorspace and HDR info for a PyroWave session.
    *
    * Shares the source state and metadata lifetime of codec streams.
-   * RTX HDR is never active for PyroWave sessions (see rtsp.cpp).
+   * Synthesized HDR uses SDR capture and session-owned HDR10 metadata.
    */
   sunshine_colorspace_t pyrowave_session_colorspace(platf::display_t &disp, const config_t &config, hdr_info_t &hdr_info) {
     const bool display_is_hdr = disp.is_hdr();
-    bool hdr_display = display_is_hdr;
+    bool hdr_display = display_is_hdr || config.rtx_hdr_active;
 
     const auto colorspace = colorspace_from_client_config(config, hdr_display);
 
     hdr_info = std::make_unique<hdr_info_raw_t>(false);
     if (colorspace_is_hdr(colorspace)) {
       SS_HDR_METADATA metadata {};
-      if (display_is_hdr && disp.get_hdr_metadata(metadata)) {
+      if (config.rtx_hdr_active) {
+        metadata = synthesize_rtx_hdr_metadata(config.rtx_hdr_peak_nits);
+        hdr_info = std::make_unique<hdr_info_raw_t>(true, metadata);
+      } else if (display_is_hdr && disp.get_hdr_metadata(metadata)) {
         hdr_info = std::make_unique<hdr_info_raw_t>(true, metadata);
       } else {
         BOOST_LOG(error) << "Couldn't get display hdr metadata when colorspace selection indicates it should have one";
@@ -6447,6 +6525,7 @@ namespace video {
     params.height = config.height;
     params.yuv444 = config.chromaSamplingType == 1;
     params.colorspace = colorspace;
+    params.rtx_hdr = config.rtx_hdr_active;
     params.framerate = config.framerate;
     params.bitrate_kbps = config.bitrate;
     params.framing = config.pyrowave_framing;
@@ -6495,6 +6574,7 @@ namespace video {
     std::vector<std::uint8_t> frame;
     std::size_t critical_bytes = 0;
     pyrowave::policy::detail_fec_controller_t detail_fec_controller(config.framerate);
+    rtx_hdr_metadata_refresh_state_t metadata_refresh;
     while (true) {
       raise_touch_port_if_geometry_changed(touch_port_event, disp.get(), config);
       // Capture can change before the first encoded packet too.
@@ -6543,6 +6623,10 @@ namespace video {
       }
 
       if (pending_hdr_info) raise_hdr_info_if_changed(hdr_event, last_hdr_info, std::move(pending_hdr_info));
+      // Every PyroWave frame is intra-coded; refreshed metadata precedes it.
+#ifdef SUNSHINE_ENABLE_NV_TRUEHDR
+      refresh_rtx_hdr_metadata_if_needed(config, nullptr, hdr_event, last_hdr_info, metadata_refresh);
+#endif
 
       const auto detail_fec = params.critical_fec && params.framing == pyrowave::policy::framing_e::records ?
                                 detail_fec_controller.observe(frame, submitted_at, config.bitrate) :
@@ -7101,12 +7185,6 @@ namespace video {
     return -1;
   }
 
-  static thread_local std::shared_ptr<platf::display_t> cached_probe_display;
-  static thread_local platf::mem_type_e cached_display_type = platf::mem_type_e::system;
-#if defined(__linux__) && defined(SUNSHINE_BUILD_CUDA)
-  static thread_local bool cached_display_is_native_nvenc_probe = false;
-#endif
-
   bool validate_encoder(
     encoder_t &encoder,
     const bool expect_failure,
@@ -7183,31 +7261,12 @@ namespace video {
     config_t config_max_ref_frames {1920, 1080, 60, 6000, 1000, 1, 1, 1, 0, 0, 0};
     config_t config_autoselect {1920, 1080, 60, 6000, 1000, 1, 0, 1, 0, 0, 0};
 
-    // If the encoder isn't supported at all (not even H.264), bail early
-    // Try to reuse cached display if same device type
-    const auto cached_adapter = cached_probe_display ? cached_probe_display->capture_adapter_id() : std::nullopt;
-    const bool cached_display_matches_required =
-      !required_adapter || (cached_adapter && *cached_adapter == *required_adapter);
-#if defined(__linux__) && defined(SUNSHINE_BUILD_CUDA)
-    const bool wants_native_nvenc_probe = &encoder == &nvenc && !required_adapter;
-    const bool cached_probe_kind_matches =
-      cached_display_is_native_nvenc_probe == wants_native_nvenc_probe;
-#else
-    const bool cached_probe_kind_matches = true;
-#endif
-    if (cached_probe_display &&
-        cached_display_type == encoder.platform_formats->dev_type &&
-        cached_probe_kind_matches &&
-        cached_display_matches_required) {
-      disp = cached_probe_display;
-    } else {
-      reset_probe_display(config_autoselect);
-      cached_probe_display = disp;
-      cached_display_type = encoder.platform_formats->dev_type;
-#if defined(__linux__) && defined(SUNSHINE_BUILD_CUDA)
-      cached_display_is_native_nvenc_probe = wants_native_nvenc_probe;
-#endif
-    }
+    // The capability cache stores values, never a live GPU device. Keep the
+    // probe source local to this validation so success, failure, and exceptions
+    // all release it, even when the caller is a long-lived startup/worker thread.
+    // All codec/ref-frame checks below still share this source until HDR needs
+    // a different format.
+    reset_probe_display(config_autoselect);
 
     if (!disp) {
       clear_capabilities();
@@ -7329,7 +7388,6 @@ namespace video {
         // Reset the synthetic surface since we're switching from SDR to HDR.
         // The D3D adapter remains exact while the fake source format changes to
         // FP16, exercising the real 10-bit encoder conversion path.
-        cached_probe_display.reset();
         reset_probe_display(generic_hdr_config);
         if (!disp) {
           return false;
@@ -7538,9 +7596,6 @@ namespace video {
     active_av1_mode = config::video.av1_mode;
     last_encoder_probe_supported_ref_frames_invalidation = false;
     last_encoder_probe_supported_yuv444_for_codec = {};
-
-    // Clear any cached display from previous probes to ensure fresh start
-    cached_probe_display.reset();
 
     auto adjust_encoder_constraints = [&](encoder_t *encoder) {
       // If we can't satisfy both the encoder and codec requirement, prefer the encoder over codec support

@@ -26,6 +26,7 @@
 
 // local includes
 #include "audio.h"
+#include "src/controller_speaker_pcm.h"
 #include "src/input_geometry_snapshot.h"
 #include "src/boost_process_shim.h"
 #include "src/config.h"
@@ -109,6 +110,7 @@ namespace platf {
     set_rgb_led,  ///< Set RGB LED
     set_adaptive_triggers,  ///< Set adaptive triggers
     haptics_pcm,  ///< 5 ms of 48 kHz S16LE stereo actuator samples
+    speaker_pcm,  ///< Independent 5 ms controller speaker samples
   };
 
   struct gamepad_feedback_msg_t {
@@ -157,8 +159,12 @@ namespace platf {
     std::uint16_t id;
     // Internal provenance for bounded host-side ViGEm send-result diagnostics.
     bool from_vigem {false};
+    // Invalidated on detach/rebind/reset, including messages already popped.
+    std::weak_ptr<controller_speaker_pcm::producer_epoch> speaker_epoch;
 
     union {
+      controller_speaker_pcm::block speaker;
+
       struct {
         std::uint32_t sequence;
         std::array<std::uint8_t, 960> samples;
@@ -317,6 +323,7 @@ namespace platf {
     std::uint16_t capabilities;
     std::uint32_t supportedButtons;
     bool persist_after_disconnect = false;
+    std::uint64_t speaker_owner = 0;
   };
 
   struct gamepad_touch_t {
@@ -396,13 +403,35 @@ namespace platf {
     virtual ~img_t() = default;
   };
 
+  /**
+   * @brief The capture frame a convert() call actually read.
+   * @details A capture image that aliases a texture the capture source keeps rewriting
+   *          (direct WGC encoder input) can hold newer pixels than its own timestamps by
+   *          the time an encoder reads it, or pixels the encoder has already converted.
+   */
+  struct converted_frame_t {
+    bool repeats_previous = false;  ///< Do not encode these pixels: they were already converted from an earlier image, or the frame they belong to could not be identified.
+    std::optional<std::chrono::steady_clock::time_point> frame_timestamp;  ///< Replaces the image's frame timestamp when set.
+    std::optional<std::chrono::steady_clock::time_point> host_processing_timestamp;  ///< Replaces the image's host processing timestamp when set.
+  };
+
   struct encode_device_t {
     virtual ~encode_device_t() = default;
 
     virtual int convert(platf::img_t &img) = 0;
 
+    converted_frame_t converted_frame;  ///< What the last convert() read; each call resets it.
+
     video::sunshine_colorspace_t colorspace;
     bool rtx_hdr_active = false;
+
+    virtual bool supports_rtx_hdr() const {
+#ifdef _WIN32
+      return true;
+#else
+      return false;
+#endif
+    }
 
     // Authoritative HDR metadata for the stream, resolved once at device creation so the
     // control-channel HDR mode message and the bitstream mastering-display SEI always agree,

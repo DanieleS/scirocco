@@ -834,6 +834,7 @@ export const settingsCategories: SettingsCategory[] = [
         fields: [
           select('capture', captureOptions, { warningKey: 'config.capture_virtual_warning' }),
           boolean('wgc_pacing_smoothing', { platform: 'windows' }),
+          boolean('wgc_direct_encoder_input', { platform: 'windows' }),
         ],
       },
       {
@@ -944,11 +945,11 @@ export const settingsCategories: SettingsCategory[] = [
     groups: [
       {
         id: 'video_rtx_hdr',
-        platform: 'windows',
+        platform: ['windows', 'linux'],
         collapsed: true,
         fields: Object.keys(extendedDefaults)
           .filter((key) => key.startsWith('rtx_hdr'))
-          .map((key) => extendedField(key, { platform: 'windows' })),
+          .map((key) => extendedField(key, { platform: ['windows', 'linux'], encoderFamily: 'nvidia' })),
       },
       {
         id: 'video_encoder',
@@ -956,6 +957,7 @@ export const settingsCategories: SettingsCategory[] = [
           select('encoder', [option('', '_common.auto')]),
           boolean('ignore_encoder_probe_failure'),
           boolean('wgc_pacing_smoothing', { platform: 'windows' }),
+          boolean('wgc_direct_encoder_input', { platform: 'windows' }),
         ],
       },
       {
@@ -1281,6 +1283,7 @@ export const settingsDefaults: Record<string, unknown> = {
   qsv_preset: 'medium',
   amd_quality: 'speed',
   wgc_pacing_smoothing: true,
+  wgc_direct_encoder_input: true,
   hevc_mode: 0,
   av1_mode: 0,
   pyrowave: true,

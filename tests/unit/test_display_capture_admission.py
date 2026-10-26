@@ -23,7 +23,7 @@ apply = source[start:end]
 # its honest failure result without turning a display preference into a rejected
 # connection (in particular before the user can remotely unlock Windows).
 nvhttp = (root / "src/nvhttp.cpp").read_text()
-request_marker = "auto request = display_helper_integration::helpers::build_request_from_session(config::video, *launch_session);"
+request_marker = "auto request = display_helper_integration::helpers::build_request_from_session("
 # nvhttp passes whether the request log carries the launch trace identity.
 nvhttp_request_marker = ("auto request = display_helper_integration::helpers::build_request_from_session(\n"
                          "          config::video,\n"
@@ -56,8 +56,25 @@ program = r'''
 #include <string>
 #include <thread>
 #include <vector>
+#include "src/platform/windows/display_helper_borrow_gate.h"
 #define BOOST_LOG(level) std::clog
 using namespace std::chrono_literals;
+int trace_id = 0;
+namespace dispatch { bool include_request_identity_log_fields(int) { return true; } }
+namespace display_helper::borrow {
+  inline std::atomic<bool> &helper_process() { static std::atomic<bool> value {false}; return value; }
+  class native_mutation_scope_t {
+  public:
+    static native_mutation_scope_t enter(bool wait) {
+      native_mutation_scope_t result;
+      result.scope_ = wait ? process_gate().wait_enter() : process_gate().try_enter();
+      return result;
+    }
+    explicit operator bool() const { return static_cast<bool>(scope_); }
+  private:
+    gate_t::scope_t scope_;
+  };
+}
 namespace display_helper_integration {
   enum class ApplyRetryPolicy { Full, StreamStart };
   enum class ApplyVerificationStatus { Verified, Unknown, Failed };
@@ -121,7 +138,7 @@ namespace display_helper_integration {
     return fake::verification;
   }
   namespace helpers {
-    std::optional<DisplayApplyRequest> build_request_from_session(int, Session &session, bool = false) {
+    std::optional<DisplayApplyRequest> build_request_from_session(int, Session &session, bool = true) {
       if (!fake::has_request) return std::nullopt;
       return DisplayApplyRequest {&session, {}};
     }
@@ -132,7 +149,6 @@ namespace display_helper_integration {
 program += apply + r'''
 }
 namespace config { int video = 0; }
-namespace dispatch { bool include_request_identity_log_fields(int) { return false; } }
 struct Tree {
   template<class T> void put(const char *, const T &) { assert(false && "display setup rejected the stream"); }
 };
@@ -241,9 +257,11 @@ monitor_header = (root / "src/platform/windows/display_output_monitor.h").read_t
 monitor_header = monitor_header.replace("#pragma once\n", "")
 monitor_header = monitor_header.replace("#include <windows.h>\n", "").replace("#include <dxgi1_6.h>\n", "")
 monitor_source = (root / "src/platform/windows/display_output_monitor.cpp").read_text()
+monitor_helpers = monitor_source[
+    monitor_source.index("    wgc_policy::output_target_identity_t target_identity("):
+    monitor_source.index("    std::optional<output_sample_t> sample_output(")
+]
 monitor_methods = monitor_source[monitor_source.index("  display_output_monitor_t::display_output_monitor_t"):]
-monitor_helpers = monitor_source[monitor_source.index("    wgc_policy::output_target_identity_t target_identity("):
-                                 monitor_source.index("    std::optional<output_sample_t> sample_output(")]
 # Advance only the monitor's observation clock; keep the actual worker, waits,
 # stop token and reinit flag so transient faults exercise production behavior.
 monitor_methods = monitor_methods.replace("std::chrono::steady_clock::now()", "MonitorClock::now()")
@@ -260,16 +278,15 @@ monitor_program = r'''
 #define BOOST_LOG(level) std::clog
 using namespace std::chrono_literals;
 struct LUID { std::uint32_t LowPart = 0; std::int32_t HighPart = 0; };
-using HMONITOR = void *;
-constexpr bool FALSE = false;
 struct RECT { int left, top, right, bottom; };
 struct DXGI_OUTPUT_DESC {
   wchar_t DeviceName[32] {};
-  HMONITOR Monitor = reinterpret_cast<HMONITOR>(std::uintptr_t {1});
+  void *Monitor = reinterpret_cast<void *>(1);
   int Rotation = 0;
   bool AttachedToDesktop = true;
   RECT DesktopCoordinates {0, 0, 1920, 1080};
 };
+constexpr int FALSE = 0;
 enum { SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN };
 namespace fake {
   std::atomic_bool hdr {false}, hdr_valid {true}, available {true}, fail_next {false}, event_subscription {false};
@@ -294,6 +311,9 @@ int GetSystemMetrics(int metric) {
 '''
 monitor_program += monitor_header + r'''
 namespace platf::dxgi {
+namespace {
+''' + monitor_helpers + r'''
+}
   std::atomic_uint64_t next_monitor_id {1};
   struct Factory {
     int revision;
@@ -305,12 +325,11 @@ namespace platf::dxgi {
     DXGI_OUTPUT_DESC desc {};
     bool hdr_valid = true, hdr = false;
   };
-''' + monitor_helpers + r'''
-  std::optional<output_sample_t> sample_output(LUID, const wchar_t *) {
+  std::optional<output_sample_t> sample_output(LUID luid, const wchar_t *) {
     std::optional<output_sample_t> result;
     if (fake::available && !fake::fail_next.exchange(false)) {
-      result = output_sample_t {std::make_shared<Factory>(Factory {fake::revision}), {}, {}, fake::hdr_valid, fake::hdr};
-      result->desc.Monitor = reinterpret_cast<HMONITOR>(static_cast<std::uintptr_t>(fake::monitor_id.load()));
+      result = output_sample_t {std::make_shared<Factory>(Factory {fake::revision}), luid, {}, fake::hdr_valid, fake::hdr};
+      result->desc.Monitor = reinterpret_cast<void *>(static_cast<std::uintptr_t>(fake::monitor_id.load()));
       result->desc.Rotation = fake::rotation;
       result->desc.DesktopCoordinates.right = fake::right;
       result->desc.AttachedToDesktop = fake::attached;

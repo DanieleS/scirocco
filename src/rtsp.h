@@ -7,6 +7,7 @@
 // standard includes
 #include "config.h"
 #include "framegen_policy.h"
+#include "hdr_stream_policy.h"
 #include "remote_session.h"
 
 #include <array>
@@ -250,6 +251,10 @@ namespace rtsp_stream {
            rtx_hdr_enabled(video_config);
   }
 
+  inline bool hdr_capture_required(const launch_session_t &session, const config::video_t &video_config) {
+    return video::hdr_stream_policy::requires_hdr_source(effective_hdr_requested(session), rtx_hdr_enabled(video_config));
+  }
+
   /**
    * @brief Whether the session should be encoded as Main10 with an SDR colorspace.
    *
@@ -345,8 +350,9 @@ namespace rtsp_stream {
   void launch_session_clear(uint32_t launch_session_id);
   /**
    * @brief Whether an RTSP launch or asynchronous session startup is pending.
+   * @param expire_pending False requests a conservative snapshot without expiry callbacks.
    */
-  bool has_pending_launch_or_startup();
+  bool has_pending_launch_or_startup(bool expire_pending = true);
 
   /**
    * @brief Publish whether an HDR stream launch is pending before the RTSP session is active.

@@ -50,6 +50,9 @@
 #include <cwchar>
 #include <cwctype>
 #include <devguid.h>
+// DEFINE_DEVPROPKEY emits the property key only when INITGUID is set first.
+#include <initguid.h>
+#include <devpkey.h>
 #include <dxgi.h>
 #include <dxgi1_6.h>
 #include <exception>
@@ -58,11 +61,6 @@
 #include <highlevelmonitorconfigurationapi.h>
 #include <icm.h>
 #include <iomanip>
-#include <initguid.h>
-// clang-format off
-// After initguid.h: MinGW has no library that defines the DEVPKEY_* keys, so this file must.
-#include <devpkey.h>
-// clang-format on
 #include <iostream>
 #include <limits>
 #include <map>
@@ -8124,7 +8122,11 @@ namespace VDISPLAY_SUNSHINE {
     return !driver_lease_tracker().all().empty();
   }
 
+  // Catalog checks precede creation, which normally opens the transport.
+  // Startup probing may never open it when a physical display is available.
+  // Open for inspection without restarting the adapter or departing a target.
   bool allowsSharedCatalogCapture() {
+    if (!ensure_control_transport_responsive("Shared virtual display catalog preflight", {}, OpenRecoveryBehavior::transport_only)) return false;
     const auto transport = control_transport_snapshot();
     if (!transport || !transport->valid()) return false;
     sunshine_driver::ControlClient client {*transport};
@@ -8132,6 +8134,7 @@ namespace VDISPLAY_SUNSHINE {
   }
 
   bool supportsRequestedResolutionCatalog() {
+    if (!ensure_control_transport_responsive("Virtual display catalog capability preflight", {}, OpenRecoveryBehavior::transport_only)) return false;
     const auto transport = control_transport_snapshot();
     if (!transport || !transport->valid()) return false;
     sunshine_driver::ControlClient client {*transport};
@@ -8139,6 +8142,7 @@ namespace VDISPLAY_SUNSHINE {
   }
 
   std::optional<bool> virtualDisplayCatalogMatches(const GUID &guid, uint32_t width, uint32_t height, bool requested_only) {
+    if (!ensure_control_transport_responsive("Retained virtual display catalog preflight", {}, OpenRecoveryBehavior::transport_only)) return std::nullopt;
     const auto transport = control_transport_snapshot();
     if (!transport || !transport->valid()) return std::nullopt;
     sunshine_driver::ControlClient client {*transport};

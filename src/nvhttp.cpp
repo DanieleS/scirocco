@@ -140,6 +140,9 @@ namespace nvhttp {
     // state transitions so a retry cannot make its dispatch decision against
     // half-published ownership or race an explicit disconnect.
     std::mutex remote_http_control_transition_mutex;
+    // Serialize Input owner retirement with the destructive part of its
+    // completion callback. Never hold this across transport joins or config apply.
+    std::mutex remote_input_cleanup_mutex;
 
     std::string remote_role_owner_key(std::string_view uuid, remote_session::role_e role) {
       return std::string {uuid} + ':' + std::to_string(static_cast<unsigned int>(role));
@@ -193,11 +196,15 @@ namespace nvhttp {
       return it == remote_role_owners.end() ? std::nullopt : std::make_optional(it->second.generation);
     }
 
-    void forget_remote_owner(std::string_view uuid, remote_session::role_e role, std::uint64_t generation) {
+    bool forget_remote_owner(std::string_view uuid, remote_session::role_e role, std::uint64_t generation) {
       std::lock_guard lock {remote_role_owners_mutex};
       const auto key = remote_role_owner_key(uuid, role);
       const auto it = remote_role_owners.find(key);
-      if (it != remote_role_owners.end() && it->second.generation == generation) remote_role_owners.erase(it);
+      if (it == remote_role_owners.end() || it->second.generation != generation) {
+        return false;
+      }
+      remote_role_owners.erase(it);
+      return true;
     }
 
     void forget_remote_client(std::string_view uuid) {
@@ -214,11 +221,11 @@ namespace nvhttp {
       remote_role_owners.clear();
     }
 
-    bool has_stream_session_activity() {
+    bool has_stream_session_activity(bool expire_pending = true) {
       // RTSP removes STOPPING sessions from session_count() before stream::session::join()
       // returns; pending launches/creations reserve the process-wide runtime layer
       // before either protocol publishes an active session.
-      return rtsp_stream::has_pending_launch_or_startup() ||
+      return rtsp_stream::has_pending_launch_or_startup(expire_pending) ||
              rtsp_stream::session_count_no_cleanup() > 0 ||
              stream::session::running_sessions.load(std::memory_order_acquire) != 0 ||
              stream::session::teardown_sessions.load(std::memory_order_acquire) != 0 ||
@@ -232,10 +239,29 @@ namespace nvhttp {
 
   void notify_remote_input_transport_lost(const std::string_view client_uuid, const std::uint64_t generation) {
     host_stream_control::activity_guard_t activity;
-    if (!activity) return;
-    forget_remote_owner(client_uuid, remote_session::role_e::input, generation);
-    if (!has_stream_session_activity() && remote_display_topology::instance().managed_client_identity_count() == 0) {
-      config::clear_runtime_config_overrides();
+    if (!activity) {
+      return;
+    }
+    bool cleared_overrides = false;
+    {
+      std::lock_guard cleanup_lock {remote_input_cleanup_mutex};
+      // Match ownership and complete destructive cleanup before a retry may
+      // prepare its replacement. A generation already retired by /launch has
+      // no claim on that replacement, even before its pending record exists.
+      if (!forget_remote_owner(client_uuid, remote_session::role_e::input, generation)) {
+        return;
+      }
+      // Do not expire other pending launches while holding the cleanup gate:
+      // their callbacks reenter here. A paused game still owns its overrides.
+      if (!has_stream_session_activity(false) && proc::proc.current_app_id() <= 0 &&
+          remote_display_topology::instance().managed_client_identity_count() == 0) {
+        config::clear_runtime_config_overrides();
+        cleared_overrides = true;
+      }
+    }
+    // Config apply can wait for a launch's read gate, so it must not retain
+    // the cleanup gate. It reads the current (possibly replaced) overrides.
+    if (cleared_overrides) {
       config::apply_config_now();
     }
   }
@@ -618,7 +644,7 @@ namespace nvhttp {
           .width = launch_session->width,
           .height = launch_session->height,
           .refresh_hz = launch_session->fps,
-          .hdr = rtsp_stream::effective_hdr_requested(*launch_session),
+          .hdr = rtsp_stream::hdr_capture_required(*launch_session, config::video),
         }
       );
       if (!reservation.accepted) {
@@ -785,6 +811,40 @@ namespace nvhttp {
     bool probe_complete;
   };
 
+  namespace {
+    void log_http_encoder_capabilities(
+      const video::advertised_encoder_capabilities_t &caps,
+      bool probe_complete,
+      std::string_view adapter_identity,
+      std::string_view reason
+    ) {
+      if (!debug.open_record()) {
+        return;
+      }
+      const auto message = std::format(
+        "HTTP encoder capabilities: adapter='{}', probe_complete={}, hdr={}, hevc_mode={}, av1_mode={}, pyrowave_mode={}, yuv444=[{},{},{}], source={}.",
+        adapter_identity,
+        probe_complete,
+        caps.hevc_mode == 3 || caps.av1_mode == 3,
+        caps.hevc_mode,
+        caps.av1_mode,
+        caps.pyrowave_mode,
+        caps.yuv444_for_codec[0],
+        caps.yuv444_for_codec[1],
+        caps.yuv444_for_codec[2],
+        reason
+      );
+      // Discovery and web UI polling share this snapshot. Serialize comparison
+      // and emission so concurrent identical responses produce one Debug line.
+      static std::mutex mutex;
+      static std::string last_message;
+      std::lock_guard lock {mutex};
+      auto &logger = message == last_message ? verbose : debug;
+      BOOST_LOG(logger) << message;
+      last_message = message;
+    }
+  }  // namespace
+
 #ifdef _WIN32
   namespace {
     bool display_helper_session_available() {
@@ -843,19 +903,13 @@ namespace nvhttp {
         }
       });
 
-      const auto publish = [](
+      std::string adapter_identity;
+      const auto publish = [&adapter_identity](
                              video::advertised_encoder_capabilities_t caps,
                              const bool probe_complete,
                              const std::string_view reason
                            ) {
-        BOOST_LOG(debug)
-          << "HTTP encoder capabilities: probe_complete=" << probe_complete
-          << ", hdr="
-          << (caps.hevc_mode == 3 || caps.av1_mode == 3)
-          << ", hevc_mode=" << caps.hevc_mode
-          << ", av1_mode=" << caps.av1_mode
-          << ", pyrowave_mode=" << caps.pyrowave_mode
-          << ", source=" << reason << '.';
+        log_http_encoder_capabilities(caps, probe_complete, adapter_identity, reason);
         return http_encoder_capabilities_t {
           .advertised = std::move(caps),
           .probe_complete = probe_complete,
@@ -863,7 +917,7 @@ namespace nvhttp {
       };
 
       bool probe_complete = false;
-      auto caps = video::advertised_encoder_capabilities(false, &probe_complete);
+      auto caps = video::advertised_encoder_capabilities(false, &probe_complete, &adapter_identity);
       if (probe_complete) {
         return publish(std::move(caps), true, "matching-cache");
       }
@@ -876,16 +930,14 @@ namespace nvhttp {
         std::try_to_lock
       );
       if (!lifecycle_lock.owns_lock()) {
-        BOOST_LOG(debug) << "Skipping HTTP encoder capability probe while stream lifecycle work owns the gate.";
         return publish(std::move(caps), false, "lifecycle-gate");
       }
-      caps = video::advertised_encoder_capabilities(false, &probe_complete);
+      caps = video::advertised_encoder_capabilities(false, &probe_complete, &adapter_identity);
       if (probe_complete) {
         return publish(std::move(caps), true, "matching-cache-after-gate");
       }
 
       if (has_active_or_stopping_stream_session()) {
-        BOOST_LOG(debug) << "Skipping HTTP encoder capability probe while a streaming session is active or stopping.";
         return publish(std::move(caps), false, "active-or-stopping-session");
       }
 
@@ -900,7 +952,7 @@ namespace nvhttp {
         BOOST_LOG(info)
           << "HTTP capability discovery is probing synthetic surfaces before the temporary display is published.";
       }
-      caps = video::advertised_encoder_capabilities(true, &probe_complete);
+      caps = video::advertised_encoder_capabilities(true, &probe_complete, &adapter_identity);
       return publish(std::move(caps), probe_complete, "idle-probe");
     }
 
@@ -1502,7 +1554,7 @@ namespace nvhttp {
           .width = launch_session->width,
           .height = launch_session->height,
           .refresh_hz = launch_session->fps,
-          .hdr = rtsp_stream::effective_hdr_requested(*launch_session),
+          .hdr = rtsp_stream::hdr_capture_required(*launch_session, config::video),
         };
         const auto reservation = remote_display_topology::instance().reserve_normal_game_identity(
           launch_session->client_uuid,
@@ -2112,16 +2164,10 @@ namespace nvhttp {
 #ifndef _WIN32
   namespace {
     http_encoder_capabilities_t advertised_encoder_capabilities_for_http() {
-      const auto publish = [](video::advertised_encoder_capabilities_t caps, const std::string_view reason) {
+      std::string adapter_identity;
+      const auto publish = [&adapter_identity](video::advertised_encoder_capabilities_t caps, const std::string_view reason) {
         const bool probe_complete = video::has_successful_encoder_probe();
-        BOOST_LOG(debug)
-          << "HTTP encoder capabilities: probe_complete=" << probe_complete
-          << ", hdr="
-          << (caps.hevc_mode == 3 || caps.av1_mode == 3)
-          << ", hevc_mode=" << caps.hevc_mode
-          << ", av1_mode=" << caps.av1_mode
-          << ", pyrowave_mode=" << caps.pyrowave_mode
-          << ", source=" << reason << '.';
+        log_http_encoder_capabilities(caps, probe_complete, adapter_identity, reason);
         return http_encoder_capabilities_t {
           .advertised = std::move(caps),
           .probe_complete = probe_complete,
@@ -2129,23 +2175,21 @@ namespace nvhttp {
       };
 
       if (video::has_successful_encoder_probe()) {
-        return publish(video::advertised_encoder_capabilities(false), "matching-cache");
+        return publish(video::advertised_encoder_capabilities(false, nullptr, &adapter_identity), "matching-cache");
       }
 
       std::unique_lock<std::mutex> lifecycle_lock(stream_lifecycle_mutex(), std::try_to_lock);
       if (!lifecycle_lock.owns_lock()) {
-        BOOST_LOG(debug) << "Skipping HTTP encoder capability probe while stream lifecycle work owns the gate.";
-        return publish(video::advertised_encoder_capabilities(false), "lifecycle-gate");
+        return publish(video::advertised_encoder_capabilities(false, nullptr, &adapter_identity), "lifecycle-gate");
       }
       if (video::has_successful_encoder_probe()) {
-        return publish(video::advertised_encoder_capabilities(false), "matching-cache-after-gate");
+        return publish(video::advertised_encoder_capabilities(false, nullptr, &adapter_identity), "matching-cache-after-gate");
       }
       if (has_stream_session_activity()) {
-        BOOST_LOG(debug) << "Skipping HTTP encoder capability probe while a streaming session is active or stopping.";
-        return publish(video::advertised_encoder_capabilities(false), "active-or-stopping-session");
+        return publish(video::advertised_encoder_capabilities(false, nullptr, &adapter_identity), "active-or-stopping-session");
       }
 
-      return publish(video::advertised_encoder_capabilities(true), "idle-probe");
+      return publish(video::advertised_encoder_capabilities(true, nullptr, &adapter_identity), "idle-probe");
     }
   }  // namespace
 #endif
@@ -2460,15 +2504,17 @@ namespace nvhttp {
       struct parsed_state_t {
         client_t client;
         nlohmann::json layout;
+        std::vector<statefile::policy::collapsed_pairing_record_t> collapsed;
       };
       const auto parse_state = [](nlohmann::json &tree) -> std::optional<parsed_state_t> {
         try {
           // Named records retain their UUID, permission mask and client commands;
           // a matching legacy alias must never create another authorized client.
+          std::vector<statefile::policy::collapsed_pairing_record_t> collapsed;
           if (!state_policy::normalize_snapshot(tree, [](const std::string &pem) {
                 return exact_certificate_identity(crypto::x509(pem));
-              })) {
-            BOOST_LOG(error) << "Vibepollo pairing state contains invalid or duplicate client certificates.";
+              }, false, &collapsed)) {
+            BOOST_LOG(error) << "Vibepollo pairing state contains invalid client certificates.";
             return std::nullopt;
           }
           const auto &root = tree["root"];
@@ -2561,7 +2607,7 @@ namespace nvhttp {
           std::vector<std::string> identities;
           std::vector<pairing_policy::paired_client_record_view_t> records;
           if (!build_paired_client_records(client, identities, records)) return std::nullopt;
-          return parsed_state_t {std::move(client), std::move(remote_display_layout)};
+          return parsed_state_t {std::move(client), std::move(remote_display_layout), std::move(collapsed)};
         } catch (...) {
           BOOST_LOG(error) << "Vibepollo pairing state is malformed.";
           return std::nullopt;
@@ -2570,6 +2616,7 @@ namespace nvhttp {
       nlohmann::json tree;
       const auto primary = statefile::load_primary_state(tree);
       if (primary == statefile::json_load_result_e::failed) return false;
+      const auto original_tree = tree;
       auto parsed = primary == statefile::json_load_result_e::loaded ? parse_state(tree) : std::nullopt;
       if (!parsed) {
         if (primary_bootstrap(primary, tree) && http::credentials_created_this_run) {
@@ -2585,6 +2632,24 @@ namespace nvhttp {
         }
         BOOST_LOG(error) << "No valid Vibepollo pairing snapshot; refusing to create a replacement identity.";
         return false;
+      }
+      if (!parsed->collapsed.empty()) {
+        BOOST_LOG(warning) << "Pairing state had " << parsed->collapsed.size()
+                           << " duplicate record(s) from older pairings. Keeping the first record for each certificate.";
+        for (const auto &record : parsed->collapsed) {
+          BOOST_LOG(warning) << "Pairing state: kept client UUID " << record.kept_uuid << " (record " << record.kept_index
+                             << "), removed duplicate UUID " << record.dropped_uuid << " (record " << record.dropped_index << ')';
+        }
+        const auto original_path = statefile::sunshine_state_path() + ".before-dedupe.bak";
+        std::error_code ec;
+        if (!fs::exists(original_path, ec) && !ec) {
+          try {
+            statefile::write_json_atomic(original_path, original_tree);
+            BOOST_LOG(info) << "Saved the original pairing state to " << original_path;
+          } catch (const std::exception &e) {
+            BOOST_LOG(warning) << "Could not save the original pairing state to " << original_path << ": " << e.what();
+          }
+        }
       }
       // Selection has already restored and validated any recovered snapshot.
       try {
@@ -4900,7 +4965,27 @@ namespace nvhttp {
           return;
         }
 
-        const bool no_active_sessions = !has_stream_session_activity();
+        std::unique_lock normal_transition_lock {normal_http_app_transition_mutex};
+        if (synthetic_control == remote_session::control_e::input) {
+          // A cached tile or a retry can arrive before the old input transport
+          // finishes closing. Retire only this client's previous generation,
+          // including pending RTSP startup, before publishing its replacement.
+          // /launch already owns the lifecycle gate; transfer it to teardown.
+          std::optional<std::uint64_t> generation;
+          {
+            // Drain even an expiry callback that already removed the owner. It
+            // must finish clearing old overrides before replacement preparation.
+            std::lock_guard cleanup_lock {remote_input_cleanup_mutex};
+            generation = remote_owner_generation(request_client_identity.uuid, remote_session::role_e::input);
+            if (generation) {
+              forget_remote_owner(request_client_identity.uuid, remote_session::role_e::input, *generation);
+            }
+          }
+          if (generation) {
+            (void) rtsp_stream::disconnect_remote_role_session(request_client_identity.uuid, remote_session::role_e::input, *generation, true);
+          }
+        }
+        const bool no_active_sessions = !has_stream_session_activity() && proc::proc.current_app_id() <= 0;
         const auto retained_profile = retained_monitor_profile(request_client_identity.uuid);
         const bool monitor_request = synthetic_control != remote_session::control_e::input;
         const auto builtin_uuid = remote_session::synthetic(
@@ -5046,11 +5131,11 @@ namespace nvhttp {
           request_client_identity.uuid, launch_session->role_generation, *monitor_profile->target,
           {launch_session->width, launch_session->height, launch_session->client_display_refresh_millihz ?
             launch_session->client_display_refresh_millihz : launch_session->exact_requested_refresh_millihz,
-            rtsp_stream::effective_hdr_requested(*launch_session)}, launch_session->output_name_override) : remote_session::activate_or_resume_monitor(
+            rtsp_stream::hdr_capture_required(*launch_session, config::video)}, launch_session->output_name_override) : remote_session::activate_or_resume_monitor(
             request_client_identity.uuid,
             request_client_identity.name,
             mode,
-            rtsp_stream::effective_hdr_requested(*launch_session),
+            rtsp_stream::hdr_capture_required(*launch_session, config::video),
             launch_session->role_generation
           );
           if (monitor.accepted) {
@@ -5074,7 +5159,7 @@ namespace nvhttp {
             return;
           }
           launch_session->virtual_display_hdr_enabled = monitor.hdr_enabled;
-          if (rtsp_stream::effective_hdr_requested(*launch_session) && !monitor.hdr_enabled) {
+          if (rtsp_stream::hdr_capture_required(*launch_session, config::video) && !monitor.hdr_enabled) {
             launch_session->force_sdr = true;
           }
           launch_session->remote_capture_output = monitor.output;
@@ -5455,6 +5540,7 @@ launch_session->exact_target_hold.reset();
         dispatch::include_request_identity_log_fields(trace_id)
       );
       if (!launch_session->virtual_display_catalog_error.empty()) {
+        BOOST_LOG(error) << launch_session->virtual_display_catalog_error;
         tree.put("root.<xmlattr>.status_code", 503);
         tree.put("root.<xmlattr>.status_message", launch_session->virtual_display_catalog_error);
         tree.put("root.gamesession", 0);
@@ -6255,6 +6341,7 @@ launch_session->exact_target_hold.reset();
       );
     }
     if (!launch_session->virtual_display_catalog_error.empty()) {
+      BOOST_LOG(error) << launch_session->virtual_display_catalog_error;
       tree.put("root.<xmlattr>.status_code", 503);
       tree.put("root.<xmlattr>.status_message", launch_session->virtual_display_catalog_error);
       tree.put("root.resume", 0);
@@ -7763,13 +7850,18 @@ launch_session->exact_target_hold.reset();
     bool clean_slate = config::sunshine.flags[config::flag::FRESH_STATE];
 
     if (!clean_slate) {
-      if (!load_state()) {
-        // Do not expose a newly generated uniqueid when durable pairing state
-        // is unavailable. The controller will retry after the filesystem or
-        // profile issue is repaired, while the recovery copy remains intact.
-        BOOST_LOG(fatal) << "HTTP interface is stopping because durable pairing state could not be loaded."sv;
-        shutdown_event->raise(true);
-        return;
+      // Do not expose a newly generated uniqueid when durable pairing state is
+      // unavailable, but do not exit either: that put the host in a service
+      // restart loop and took the Web UI down with it. Keep the rest of the
+      // host up and retry until the filesystem or profile issue is repaired.
+      std::chrono::seconds retry_delay = 15s;
+      while (!load_state()) {
+        BOOST_LOG(error) << "Pairing and streaming are unavailable because durable pairing state could not be loaded; retrying in "sv
+                         << retry_delay.count() << " seconds."sv;
+        if (shutdown_event->view(retry_delay)) {
+          return;
+        }
+        retry_delay = std::min<std::chrono::seconds>(retry_delay * 2, 5min);
       }
     } else {
       // FRESH_STATE is an explicit, non-persistent test/reset mode. It is the

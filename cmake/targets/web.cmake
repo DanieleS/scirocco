@@ -36,6 +36,8 @@ list(REMOVE_DUPLICATES SUNSHINE_WEB_SOURCES)
 find_program(SUNSHINE_NPM_EXECUTABLE NAMES npm.cmd npm)
 find_program(SUNSHINE_NODE_EXECUTABLE NAMES node)
 
+# web_ui depends on both entrypoints so deleting either rebuilds the bundle.
+# Makefile generators need a build rule for each dependency, not BYPRODUCTS.
 # Fork addition: the built web UIs get the product name users see (SUNSHINE_BRAND_NAME), see
 # web/scripts/brand.mjs. Idempotent, so a prebuilt copy goes through it too.
 set(SUNSHINE_WEB_BRAND_COMMAND
@@ -49,13 +51,13 @@ set(SUNSHINE_PREBUILT_WEB_DIR "" CACHE PATH "Previously built web UI output to c
 
 if(SUNSHINE_PREBUILT_WEB_DIR)
     add_custom_command(
-        OUTPUT "${SUNSHINE_WEB_STAMP}"
+        OUTPUT
+            "${SUNSHINE_WEB_STAMP}"
+            "${SUNSHINE_LEGACY_WEB_OUTPUT_DIR}/index.html"
+            "${SUNSHINE_WEB_OUTPUT_DIR}/index.html"
         COMMAND "${CMAKE_COMMAND}" -E copy_directory "${SUNSHINE_PREBUILT_WEB_DIR}" "${SUNSHINE_WEB_ROOT_OUTPUT_DIR}"
         COMMAND ${SUNSHINE_WEB_BRAND_COMMAND}
         COMMAND "${CMAKE_COMMAND}" -E touch "${SUNSHINE_WEB_STAMP}"
-        BYPRODUCTS
-            "${SUNSHINE_LEGACY_WEB_OUTPUT_DIR}/index.html"
-            "${SUNSHINE_WEB_OUTPUT_DIR}/index.html"
         DEPENDS ${SUNSHINE_WEB_SOURCES}
         COMMENT "Using the prebuilt Vibepollo browser interface from ${SUNSHINE_PREBUILT_WEB_DIR}"
     )
@@ -65,7 +67,10 @@ if(SUNSHINE_PREBUILT_WEB_DIR)
         "${SUNSHINE_WEB_OUTPUT_DIR}/index.html")
 elseif(SUNSHINE_NPM_EXECUTABLE)
     add_custom_command(
-        OUTPUT "${SUNSHINE_WEB_STAMP}"
+        OUTPUT
+            "${SUNSHINE_WEB_STAMP}"
+            "${SUNSHINE_LEGACY_WEB_OUTPUT_DIR}/index.html"
+            "${SUNSHINE_WEB_OUTPUT_DIR}/index.html"
         COMMAND "${CMAKE_COMMAND}" -E chdir "${SUNSHINE_LEGACY_WEB_SOURCE_DIR}"
                 "${SUNSHINE_NPM_EXECUTABLE}" ci --ignore-scripts --no-audit --no-fund --prefer-offline
         COMMAND "${CMAKE_COMMAND}" -E chdir "${SUNSHINE_LEGACY_WEB_SOURCE_DIR}"
@@ -79,9 +84,6 @@ elseif(SUNSHINE_NPM_EXECUTABLE)
         COMMAND ${SUNSHINE_WEB_BRAND_COMMAND}
         COMMAND "${CMAKE_COMMAND}" -E touch "${SUNSHINE_WEB_STAMP}"
         WORKING_DIRECTORY "${SUNSHINE_WEB_SOURCE_DIR}"
-        BYPRODUCTS
-            "${SUNSHINE_LEGACY_WEB_OUTPUT_DIR}/index.html"
-            "${SUNSHINE_WEB_OUTPUT_DIR}/index.html"
         DEPENDS ${SUNSHINE_WEB_SOURCES}
         COMMENT "Building the Vibepollo browser interface"
         USES_TERMINAL

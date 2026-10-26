@@ -31,6 +31,7 @@ harness = r'''
 #include <algorithm>
 #include "tests/unit/display_helper_borrow_fixture.h"
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cctype>
 #include <cstdint>
@@ -40,6 +41,21 @@ harness = r'''
 #include <sstream>
 #include <string>
 #include <vector>
+#include "src/platform/windows/display_helper_borrow_gate.h"
+namespace display_helper::borrow {
+  inline std::atomic<bool> &helper_process() { static std::atomic<bool> value {false}; return value; }
+  class native_mutation_scope_t {
+  public:
+    static native_mutation_scope_t enter(bool wait) {
+      native_mutation_scope_t result;
+      result.scope_ = wait ? process_gate().wait_enter() : process_gate().try_enter();
+      return result;
+    }
+    explicit operator bool() const { return static_cast<bool>(scope_); }
+  private:
+    gate_t::scope_t scope_;
+  };
+}
 using LONG = std::int32_t;
 using DISPLAYCONFIG_DEVICE_INFO_TYPE = std::int32_t;
 constexpr LONG ERROR_SUCCESS=0, ERROR_INVALID_PARAMETER=87, ERROR_NOT_FOUND=1168,
@@ -71,12 +87,11 @@ LONG DisplayConfigSetDeviceInfo(DISPLAYCONFIG_DEVICE_INFO_HEADER *header) {
   return write_status;
 }
 // SETTER
-struct Device { std::string m_device_id, m_monitor_device_path; bool is_virtual=true; };
+struct Device { std::string m_device_id, m_monitor_device_path; };
 std::optional<std::vector<Device>> devices;
 bool equals_ci(const std::string &a, const std::string &b) {
   return a.size()==b.size() && std::equal(a.begin(),a.end(),b.begin(), [](unsigned char x,unsigned char y) { return std::tolower(x)==std::tolower(y); });
 }
-bool is_virtual_display_device(const Device &device) { return device.is_virtual; }
 namespace display_device { enum class DeviceEnumerationDetail { Minimal }; }
 namespace platf {
   std::wstring from_utf8(const std::string &s) { return {s.begin(),s.end()}; }
@@ -129,8 +144,9 @@ int main() {
   reset(); write_status=5; result=set_display_scale_percent(L"virtual:one",175);
   assert(!result.applied && result.status==5 && writes==1);
 
-  // Resolve only the exact stable identity, even without any GDI name. Retry
-  // against a fresh enumeration after publication instead of capturing a name.
+  // Resolve only the exact stable identity, even without any GDI name. This
+  // generic lookup does not assert that the path is eligible for DPI changes;
+  // set_display_scale_percent still enforces that policy before writing.
   devices=std::vector<Device>{{"{other}","virtual:other"},{"{wanted}",""}};
   assert(!resolve_monitor_device_path_for_device_id("{wanted}"));
   devices->back().m_monitor_device_path="virtual:wanted";
@@ -140,6 +156,12 @@ int main() {
   // Exact device-ID lookup is generic: a physical device with that ID resolves too.
   devices->back().is_virtual=false;
   assert(resolve_monitor_device_path_for_device_id("{wanted}")==L"virtual:wanted");
+  devices->back().m_monitor_device_path="physical:wanted";
+  auto physical_path=resolve_monitor_device_path_for_device_id("{wanted}");
+  assert(physical_path==L"physical:wanted");
+  reset();
+  result=set_display_scale_percent(*physical_path,175);
+  assert(!result.applied && !result.target_found && writes==0);
   devices=std::nullopt;
   assert(!resolve_monitor_device_path_for_device_id("{wanted}"));
   std::cout << "Windows DPI sentinel, bounds, write failures, session retries, and stable identity regressions passed.\n";
@@ -157,6 +179,7 @@ with tempfile.TemporaryDirectory(prefix="vdisplay-scale-") as directory:
         subprocess.run(command + ["-fsanitize=undefined", "-fno-sanitize-recover=undefined", str(source), "-o", str(binary)], check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as error:
         if "cannot find -lubsan" not in error.stderr:
+            print(error.stderr, file=sys.stderr)
             raise
         print("UBSan runtime unavailable; running functional assertions without sanitizer")
         subprocess.run(command + [str(source), "-o", str(binary)], check=True)

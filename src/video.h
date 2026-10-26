@@ -101,6 +101,10 @@ namespace video {
     // Dynamic FEC only: the session's video budget, which the encoder reads when it applies a
     // new FEC allowance. Null for every session that did not negotiate dynamic FEC.
     std::shared_ptr<video_fec::budget_t> fec_budget;
+    // Set on a shared capture's config only: some live consumer of that capture
+    // is PyroWave, which pins and reads each capture image's own texture and
+    // keyed mutex, so the capture must give every image a stable copy.
+    bool shared_capture_pyrowave = false;
   };
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
@@ -289,11 +293,19 @@ namespace video {
 
     virtual int convert(platf::img_t &img) = 0;
 
+    /**
+     * @brief What the last convert() actually read from the capture image.
+     */
+    virtual platf::converted_frame_t converted_frame() const {
+      return {};
+    }
+
     virtual void request_idr_frame() = 0;
 
     virtual void request_normal_frame() = 0;
 
-    virtual void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) = 0;
+    // Returns false when invalidation falls back to a requested IDR.
+    virtual bool invalidate_ref_frames(int64_t first_frame, int64_t last_frame) = 0;
 
     /**
      * @brief Apply a new encoder bitrate to the live encoder without rebuilding it.
@@ -477,6 +489,13 @@ namespace video {
   advertised_encoder_capabilities_t advertised_encoder_capabilities(
     bool probe_before_negative = false,
     bool *probe_complete = nullptr
+  );
+  // Diagnostic outputs describe the same adapter-keyed snapshot as the returned
+  // capabilities, including when a temporary adapter hint is in use.
+  advertised_encoder_capabilities_t advertised_encoder_capabilities(
+    bool probe_before_negative,
+    bool *probe_complete,
+    std::string *adapter_identity
   );
 
 #ifdef _WIN32

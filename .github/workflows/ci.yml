@@ -30,6 +30,7 @@ on:
     branches:
       - main
       - master
+      - canary
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -236,7 +237,8 @@ jobs:
     uses: ./.github/workflows/ci-windows.yml
     with:
       use_self_hosted: ${{ github.event_name == 'workflow_dispatch' && inputs.use_self_hosted }}
-      build_only: ${{ needs.release-candidate.outputs.should_release == 'true' }}
+      # CI validates MSI packaging; consumer setup EXEs belong to release workflows.
+      build_only: true
       # Always, not only for the release build as upstream does: a Windows-only test that breaks
       # would otherwise first fail on the tag, after the pull request that broke it was merged
       # (it happened with regression_playnite_plugin_upgrade). On a pull request the nightly sync

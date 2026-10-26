@@ -149,8 +149,6 @@ namespace VDISPLAY::policy {
     return candidate_matches && matching_candidate_count == 1;
   }
 
-  // defer_unidentified_readiness_candidate lives in virtual_display_policy.h.
-
   class inactive_reactivation_budget_t {
   public:
     using duration = std::chrono::steady_clock::duration;
