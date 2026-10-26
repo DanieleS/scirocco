@@ -62,7 +62,7 @@ std::unordered_map<std::string, remote_role_owner_t> remote_role_owners;\n'''
     apply_start = locate(r'^[ \t]*if \(no_active_sessions\) \{', runtime_start)
     runtime_apply = function(nv[apply_start:], 'if (no_active_sessions) {')
     monitor_reconciliation = '\n'.join(function(rtsp, signature) for signature in (
-        'void reconcile_abandoned_monitor_locked(', 'void reconcile_abandoned_monitor(',
+        'void reconcile_abandoned_monitor_locked(', 'void retry_abandoned_monitor(', 'void reconcile_abandoned_monitor(',
     ))
     matches = '\n'.join(function(stream, signature) for signature in (
         'bool uuid_match(', 'bool remote_role_match(',
