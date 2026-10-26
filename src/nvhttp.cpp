@@ -4456,6 +4456,7 @@ namespace nvhttp {
       nlohmann::json named_cert_nodes = nlohmann::json::array();
       const client_t client = client_root_snapshot();
 #ifdef _WIN32
+      // A temporary control handle queries capability without changing driver state.
       const bool catalog_supported = VDISPLAY::supportsRequestedResolutionCatalog();
 #endif
       std::list<std::string> connected_uuids = rtsp_stream::get_all_session_uuids();
