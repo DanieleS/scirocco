@@ -250,8 +250,6 @@ bool prepare(bool has_app_output_override = false, bool request_virtual_display 
              bool include_identity_log_fields = true) {
   bool no_active_sessions = true;
   auto launch_session = std::make_shared<rtsp_stream::launch_session_t>(launch_settings);
-  // The resolver parameter that decides whether logs may name the selected output.
-  [[maybe_unused]] const bool include_identity_log_fields = true;
   if (has_app_output_override) launch_session->output_name_override = config::output;
 ''' + apollo_request_transport + validation + fallback + r'''
   last_request_preparation = display_helper_integration::helpers::request_preparation(config::video, *launch_session);

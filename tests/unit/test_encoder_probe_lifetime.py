@@ -41,7 +41,9 @@ def main():
 #include <thread>
 #include <utility>
 #include <vector>
+#ifndef _WIN32
 #define _WIN32
+#endif
 #define BOOST_LOG(level) log_output
 using namespace std::literals;
 std::ostringstream log_output;

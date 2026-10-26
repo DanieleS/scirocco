@@ -317,8 +317,6 @@ bool first_launch_tv_off(Time deadline, bool include_identity_log_fields) {
   [[maybe_unused]] std::optional<std::string> app_output_override, pending_output_override;
   struct TVSession { std::optional<std::string> output_name_override, virtual_display_mode_override; };
   [[maybe_unused]] TVSession session, *launch_session = &session;
-  // The resolver parameter that decides whether logs may name the dropped output.
-  [[maybe_unused]] const bool include_identity_log_fields = true;
 ''' + tv_block + r'''
   return request_virtual_display && admit(deadline, [=] { return fake_now >= deadline; });
 }
@@ -688,7 +686,6 @@ void prepare_resume(ResumeSession &session, bool request_virtual_display) {
   auto reserve_normal_vdd_identity = [] { return identity_available; };
   auto apply_framegen_refresh_policy = [](bool) {};
   const auto display_startup_deadline = fake_now + 2s;
-  [[maybe_unused]] const bool include_identity_log_fields = true;
   const std::function<bool()> display_startup_cancelled = [] { return false; };
   [[maybe_unused]] const std::function<void()> disarm_startup_restore = [&] {
     (void) display_helper_integration::disarm_pending_restore(display_startup_cancelled, display_startup_deadline, true);

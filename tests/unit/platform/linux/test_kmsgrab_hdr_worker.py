@@ -96,13 +96,6 @@ namespace safe {
     }
     std::optional<T> pop() { if (probe::on_pop) probe::on_pop(); if (items.empty()) return {}; auto t=std::move(items.front()); items.pop_front(); return t; }
     template<class D> std::optional<T> pop(D) { return pop(); }
-    std::vector<T> drain() {
-      std::vector<T> result;
-      result.reserve(items.size());
-      std::move(items.begin(), items.end(), std::back_inserter(result));
-      items.clear();
-      return result;
-    }
     void raise(const T &) { ++probe::deliveries; if (probe::on_frame) probe::on_frame(); }
   };
   struct signal_t { void raise(bool) { probe::reinitializing=true; if (probe::on_reinit) probe::on_reinit(); } void reset() { probe::reinitializing=false; } };

@@ -51,20 +51,6 @@ def program(root):
 #include "src/platform/windows/display_snapshot_restore.h"
 #include "tests/unit/display_helper_borrow_fixture.h"
 using namespace std::chrono_literals;
-namespace display_helper::borrow {
-  inline std::atomic<bool> &helper_process() { static std::atomic<bool> value {false}; return value; }
-  class native_mutation_scope_t {
-  public:
-    static native_mutation_scope_t enter(bool wait) {
-      native_mutation_scope_t result;
-      result.scope_ = wait ? process_gate().wait_enter() : process_gate().try_enter();
-      return result;
-    }
-    explicit operator bool() const { return static_cast<bool>(scope_); }
-  private:
-    gate_t::scope_t scope_;
-  };
-}
 namespace display_device {
   enum class DisplayRecoveryBehavior { Skip };
   struct DisplayRecoveryBehaviorGuard { explicit DisplayRecoveryBehaviorGuard(DisplayRecoveryBehavior) {} };

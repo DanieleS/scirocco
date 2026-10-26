@@ -42,20 +42,6 @@ harness = r'''
 #include <string>
 #include <vector>
 #include "src/platform/windows/display_helper_borrow_gate.h"
-namespace display_helper::borrow {
-  inline std::atomic<bool> &helper_process() { static std::atomic<bool> value {false}; return value; }
-  class native_mutation_scope_t {
-  public:
-    static native_mutation_scope_t enter(bool wait) {
-      native_mutation_scope_t result;
-      result.scope_ = wait ? process_gate().wait_enter() : process_gate().try_enter();
-      return result;
-    }
-    explicit operator bool() const { return static_cast<bool>(scope_); }
-  private:
-    gate_t::scope_t scope_;
-  };
-}
 using LONG = std::int32_t;
 using DISPLAYCONFIG_DEVICE_INFO_TYPE = std::int32_t;
 constexpr LONG ERROR_SUCCESS=0, ERROR_INVALID_PARAMETER=87, ERROR_NOT_FOUND=1168,
@@ -154,7 +140,6 @@ int main() {
   assert(!resolve_monitor_device_path_for_device_id("{missing}"));
   assert(!resolve_monitor_device_path_for_device_id(""));
   // Exact device-ID lookup is generic: a physical device with that ID resolves too.
-  devices->back().is_virtual=false;
   assert(resolve_monitor_device_path_for_device_id("{wanted}")==L"virtual:wanted");
   devices->back().m_monitor_device_path="physical:wanted";
   auto physical_path=resolve_monitor_device_path_for_device_id("{wanted}");

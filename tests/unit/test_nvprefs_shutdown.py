@@ -58,9 +58,7 @@ shutdown_phase::tracker_t shutdown_phase_state;
 #include <string_view>
 #include <utility>
 #include <vector>
-#include "src/shutdown_phase.h"
 using namespace std::literals;
-shutdown_phase::tracker_t shutdown_phase_state;
 namespace util {
 PRODUCTION_GUARD
 }

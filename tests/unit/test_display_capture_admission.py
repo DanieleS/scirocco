@@ -61,20 +61,6 @@ program = r'''
 using namespace std::chrono_literals;
 int trace_id = 0;
 namespace dispatch { bool include_request_identity_log_fields(int) { return true; } }
-namespace display_helper::borrow {
-  inline std::atomic<bool> &helper_process() { static std::atomic<bool> value {false}; return value; }
-  class native_mutation_scope_t {
-  public:
-    static native_mutation_scope_t enter(bool wait) {
-      native_mutation_scope_t result;
-      result.scope_ = wait ? process_gate().wait_enter() : process_gate().try_enter();
-      return result;
-    }
-    explicit operator bool() const { return static_cast<bool>(scope_); }
-  private:
-    gate_t::scope_t scope_;
-  };
-}
 namespace display_helper_integration {
   enum class ApplyRetryPolicy { Full, StreamStart };
   enum class ApplyVerificationStatus { Verified, Unknown, Failed };

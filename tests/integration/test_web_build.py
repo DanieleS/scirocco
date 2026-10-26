@@ -66,6 +66,11 @@ def main():
                 (app / generated).mkdir()
                 (app / generated / "generated.js").write_text("// generated fixture\n")
 
+        # Fork addition: web.cmake runs web/scripts/brand.mjs on the output after the build.
+        # Branding is covered by brand.test.ts; here a no-op script keeps the ordering real.
+        (assets / "web/scripts").mkdir()
+        (assets / "web/scripts/brand.mjs").write_text("// branding stub\n")
+
         npm_script = fixture / "fake_npm.py"
         npm_script.write_text('''import json
 import os

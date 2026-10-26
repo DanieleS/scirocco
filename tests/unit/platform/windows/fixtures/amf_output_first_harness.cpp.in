@@ -475,11 +475,6 @@ profile_result profile(int count, std::chrono::nanoseconds convert = 1ms) {
   encode_amf(frame_nr++, s, packets, channel_data, {}, {}, {});
   auto encode_frame_threshold = 6060606ns;
   int skipped = 0;
-  // The image wait also fans out touch-port geometry, which this AMF timing model leaves inert.
-  [[maybe_unused]] struct {} touch_port_event;
-  [[maybe_unused]] struct { void *get() const { return nullptr; } } disp;
-  [[maybe_unused]] struct {} config;
-  [[maybe_unused]] auto raise_touch_port_if_geometry_changed = [](const auto &, void *, const auto &) {};
   for (int i = 0; i < count; i++) {
     if (!deliver_ready_amf_output()) {
       break;
