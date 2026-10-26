@@ -2205,6 +2205,8 @@ namespace nvhttp {
     constexpr auto pairing_session_expiry = std::chrono::minutes(10);
     client_t client_root;
     std::mutex client_mutex;
+    // Serialize layout writes with pairing removal through coordinator updates.
+    std::mutex display_layout_mutex;
     std::atomic_bool authorization_state_ready {false};
     std::atomic<uint32_t> session_id_counter;
 
@@ -2492,6 +2494,7 @@ namespace nvhttp {
       statefile::migrate_recent_state_keys();
       const auto &vibeshine_path = statefile::vibeshine_state_path();
       const bool share_state_file = statefile::share_state_file();
+      std::lock_guard layout_lock(display_layout_mutex);
       std::lock_guard<std::mutex> state_lock(statefile::state_mutex());
       struct parsed_state_t {
         client_t client;
@@ -4500,6 +4503,8 @@ namespace nvhttp {
     }
 
     bool set_remote_display_layout(const nlohmann::json &layout, std::string &error) {
+      std::lock_guard layout_lock(display_layout_mutex);
+      const auto physical_ids = remote_display_topology::instance().physical_node_ids();
       std::vector<std::string> known_clients;
       {
         std::lock_guard<std::mutex> lock(client_mutex);
@@ -4512,7 +4517,7 @@ namespace nvhttp {
       if (!remote_display_topology::validate_layout(
             layout,
             known_clients,
-            remote_display_topology::instance().physical_node_ids(),
+            physical_ids,
             error)) {
         return false;
       }
@@ -7570,10 +7575,14 @@ launch_session->exact_target_hold.reset();
     if (!config::sunshine.flags[config::flag::FRESH_STATE] && !authorization_state_ready.load(std::memory_order_acquire)) return false;
     std::vector<p_named_cert_t> clients;
     {
-      std::lock_guard<std::mutex> lock(client_mutex);
-      clients = std::move(client_root.named_devices);
-      client_root = client_t {};
-      cert_chain.clear();
+      std::lock_guard layout_lock(display_layout_mutex);
+      {
+        std::lock_guard<std::mutex> lock(client_mutex);
+        clients = std::move(client_root.named_devices);
+        client_root = client_t {};
+        cert_chain.clear();
+      }
+      remote_display_topology::instance().set_layout(nlohmann::json {});
     }
     clear_tls_client_identities();
     {
@@ -7952,7 +7961,8 @@ launch_session->exact_target_hold.reset();
 
     bool empty = false;
     {
-      std::lock_guard<std::mutex> lock(client_mutex);
+      std::lock_guard layout_lock(display_layout_mutex);
+      std::unique_lock<std::mutex> lock(client_mutex);
       for (auto it = client_root.named_devices.begin(); it != client_root.named_devices.end();) {
         if ((*it)->uuid == uuid) {
 
@@ -7964,8 +7974,18 @@ launch_session->exact_target_hold.reset();
       }
       empty = client_root.named_devices.empty();
       if (removed) {
+        nlohmann::json layout;
+        try {
+          layout = nlohmann::json::parse(client_root.remote_display_layout_json);
+        } catch (...) {
+          layout = nlohmann::json {};
+        }
+        layout = remote_display_topology::remove_client_from_layout(layout, std::string {uuid});
+        client_root.remote_display_layout_json = layout.dump();
         cert_chain.clear();
         for (auto &client : client_root.named_devices) cert_chain.add(client);
+        lock.unlock();
+        remote_display_topology::instance().set_layout(std::move(layout));
       }
     }
 
