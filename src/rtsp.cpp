@@ -1011,6 +1011,39 @@ namespace rtsp_stream {
       return false;
     }
 
+    // Caller holds the lifecycle gate, so startup either failed pending
+    // admission or published its session before this check.
+    void reconcile_abandoned_monitor_locked(const std::shared_ptr<launch_session_t> &pending) {
+      if (pending && pending->role == remote_session::role_e::monitor && !pending->client_uuid.empty() &&
+          !pending->monitor_stream_published) {
+        remote_session::notify_monitor_transport_lost(pending->client_uuid, pending->role_generation);
+      }
+    }
+
+    // An expired launch may already have a startup worker. Queue its
+    // reconciliation behind the lifecycle gate instead of racing startup.
+    void reconcile_abandoned_monitor(const std::shared_ptr<launch_session_t> &pending) {
+      if (!pending || pending->role != remote_session::role_e::monitor || pending->client_uuid.empty()) return;
+      try {
+        // Some expiry checks are called while the lifecycle gate is already
+        // held. Dispatch the startup submission through the IO loop so its
+        // failure finalizer cannot synchronously reacquire that same gate.
+        post([this, pending] {
+          try {
+            run_startup([this, pending](bool admitted) {
+              if (!admitted) return;
+              std::unique_lock<std::mutex> lifecycle_lock(nvhttp::stream_lifecycle_mutex());
+              reconcile_abandoned_monitor_locked(pending);
+            });
+          } catch (const std::exception &ex) {
+            BOOST_LOG(warning) << "Could not queue abandoned Remote Monitor reconciliation: " << ex.what();
+          }
+        });
+      } catch (const std::exception &ex) {
+        BOOST_LOG(warning) << "Could not queue abandoned Remote Monitor reconciliation: " << ex.what();
+      }
+    }
+
     void session_clear(uint32_t launch_session_id) {
       host_stream_control::activity_guard_t activity;
       if (!activity) return;
@@ -1040,7 +1073,10 @@ namespace rtsp_stream {
         pending_launches_remain = !_launch_sessions.empty();
       }
 
-      for (const auto &pending : removed_pending_sessions) release_pending_runtime_holds(pending);
+      for (const auto &pending : removed_pending_sessions) {
+        release_pending_runtime_holds(pending);
+        reconcile_abandoned_monitor_locked(pending);
+      }
       if (!removed) {
         BOOST_LOG(debug) << "Attempted to clear unknown RTSP launch session: "sv << launch_session_id;
       } else if (!pending_launches_remain) {
@@ -1174,6 +1210,7 @@ namespace rtsp_stream {
       }
       for (const auto &launch_session : removed_pending_sessions) {
         release_pending_runtime_holds(launch_session);
+        reconcile_abandoned_monitor_locked(launch_session);
         if (launch_session->role == remote_session::role_e::input) {
           nvhttp::notify_remote_input_transport_lost(launch_session->client_uuid, launch_session->role_generation);
         }
@@ -1377,7 +1414,7 @@ namespace rtsp_stream {
         }
         stream::session::join(*slot);
       }
-
+      for (const auto &pending : removed_pending_sessions) reconcile_abandoned_monitor(pending);
       if (!to_cleanup.empty()) {
         nvhttp::mark_client_last_seen(client_uuid);
       }
@@ -1564,7 +1601,10 @@ namespace rtsp_stream {
       const std::vector<pending_policy::pending_owner_t> &expired_owners = {},
       const std::vector<std::shared_ptr<launch_session_t>> &expired_sessions = {}
     ) {
-      for (const auto &pending : expired_sessions) release_pending_runtime_holds(pending);
+      for (const auto &pending : expired_sessions) {
+        release_pending_runtime_holds(pending);
+        reconcile_abandoned_monitor(pending);
+      }
       for (const auto &owner : pending_policy::expired_remote_input_owners(expired_owners)) {
         nvhttp::notify_remote_input_transport_lost(owner.client_uuid, owner.generation);
       }
@@ -2730,6 +2770,7 @@ namespace rtsp_stream {
           // Cancellation can then find and synchronously join every started
           // session instead of racing the posted RTSP response callback.
           server->insert(stream_session, client_uuid, stream_session && stream_hdr_enabled);
+          if (pending_launch->role == remote_session::role_e::monitor) pending_launch->monitor_stream_published = true;
         }
         // Ownership is published, so drop the gate before the local reference goes out of
         // scope. A failed start can hold the last reference, and ~session_t may then run
