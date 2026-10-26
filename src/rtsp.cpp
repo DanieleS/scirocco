@@ -184,11 +184,12 @@ namespace rtsp_stream {
     // per-frame RTX HDR runtime still bypasses conversion while the foreground is
     // desktop or any non-matching app, so we can turn RTX HDR off without changing
     // WGC capture format or reinitializing the encoder.
-    // TrueHDR conversion lives in the avcodec/NVENC/AMF encode devices; the PyroWave
-    // encoder converts on its own device and has no SDR->HDR stage.
+    // PyroWave runs TrueHDR on its own conversion device on both platforms.
     config.rtx_hdr_active = config::runtime_config_override_enabled("rtx_hdr") &&
                             config::video.rtx_hdr.enabled &&
+#if !defined(SUNSHINE_ENABLE_NV_TRUEHDR)
                             config.videoFormat != pyrowave::protocol::BITSTREAM_FORMAT &&
+#endif
                             config.dynamicRange > 0 &&
                             !config.prefer_sdr_10bit &&
                             !config.force_sdr;
@@ -1071,7 +1072,9 @@ namespace rtsp_stream {
       return static_cast<int>(_session_state->sessions.size());
     }
 
-    bool has_pending_launch_or_startup() {
+    // Vibepollo stores launch entries separately; this query never expires them,
+    // so either mode provides the conservative non-reentrant snapshot.
+    bool has_pending_launch_or_startup([[maybe_unused]] bool expire_pending = true) {
       bool has_pending_launch = false;
       {
         std::lock_guard<std::mutex> lock(_launch_sessions_mutex);
@@ -1865,8 +1868,8 @@ namespace rtsp_stream {
     server.session_clear(launch_session_id);
   }
 
-  bool has_pending_launch_or_startup() {
-    return server.has_pending_launch_or_startup();
+  bool has_pending_launch_or_startup(bool expire_pending) {
+    return server.has_pending_launch_or_startup(expire_pending);
   }
 
   void set_vulkan_hdr_layer_pending_stream(bool active) {

@@ -225,7 +225,7 @@ namespace display_helper_integration::helpers {
     const config::video_t &video_config_;
     config::video_t effective_video_config_;
     const rtsp_stream::launch_session_t &session_;
-    bool include_request_detail_log_fields_;
+    bool include_request_detail_log_fields_ = true;
     SessionDisplayConfigurationHelper(const config::video_t &, const rtsp_stream::launch_session_t &, bool = false, bool = true);
   };
 ''' + constructor + r'''
@@ -246,11 +246,10 @@ namespace actual_topology_policy {
 }
 rtsp_stream::launch_session_t launch_settings;
 std::optional<display_device::SingleDisplayConfiguration::DevicePreparation> last_request_preparation;
-bool prepare(bool has_app_output_override = false, bool request_virtual_display = false) {
+bool prepare(bool has_app_output_override = false, bool request_virtual_display = false,
+             bool include_identity_log_fields = true) {
   bool no_active_sessions = true;
   auto launch_session = std::make_shared<rtsp_stream::launch_session_t>(launch_settings);
-  // The resolver parameter that decides whether logs may name the selected output.
-  [[maybe_unused]] const bool include_identity_log_fields = true;
   if (has_app_output_override) launch_session->output_name_override = config::output;
 ''' + apollo_request_transport + validation + fallback + r'''
   last_request_preparation = display_helper_integration::helpers::request_preparation(config::video, *launch_session);

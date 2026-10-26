@@ -130,6 +130,7 @@ program = r'''
 #include <string>
 #include <thread>
 #include <vector>
+#include "src/platform/windows/display_helper_borrow_gate.h"
 
 using namespace std::chrono_literals;
 struct NullLog { template<class T> NullLog &operator<<(const T &) { return *this; } };

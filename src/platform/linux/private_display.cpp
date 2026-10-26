@@ -109,6 +109,10 @@ namespace platf::linux_private_display {
       std::map<std::string, std::string> reservations;
       std::map<std::string, double> retained_scales;
       std::set<std::string> newly_connected_reservations;
+      // KDE's idle screen-off reconfigures every GPU. On NVIDIA it wedged GSP
+      // while only a retained private output was lit and no client remained,
+      // so a layout without lit physical screens keeps this until restore.
+      std::shared_ptr<void> retained_screen_hold;
       std::atomic<std::uint64_t> cleanup_generation {0};
       std::atomic<std::uint64_t> reset_generation {0};
       // Destroy/join the worker before its snapshot, generation and mutex.
@@ -1363,7 +1367,7 @@ namespace platf::linux_private_display {
         if (enabled(*output) && capture_available && (!allow_display_changes || shared)) {
           const bool requested_hdr = rtsp_stream::effective_hdr_requested(session);
           const bool current_hdr = output_hdr_capable(output, *output_name) && output->value("hdr", false);
-          if (requested_hdr && !current_hdr) session.force_sdr = true;
+          if (rtsp_stream::hdr_capture_required(session, config::video) && !current_hdr) session.force_sdr = true;
           session.virtual_display_hdr_enabled = requested_hdr && current_hdr;
           session.virtual_display_ready_since = std::chrono::steady_clock::now();
         }
@@ -1588,7 +1592,7 @@ namespace platf::linux_private_display {
       if (output) {
         const bool current_hdr = output->value("hdr", false) &&
                                  output_hdr_capable(nullptr, session.virtual_display_device_id);
-        if (rtsp_stream::effective_hdr_requested(session) && !current_hdr) {
+        if (rtsp_stream::hdr_capture_required(session, config::video) && !current_hdr) {
           session.force_sdr = true;
         }
         session.virtual_display_hdr_enabled = current_hdr;
@@ -1747,6 +1751,7 @@ namespace platf::linux_private_display {
     int right_edge = 0;
     int bottom_edge = 0;
     int last_priority = 0;
+    bool physical_output_lit = false;
     for (const auto &output : (*configuration)["outputs"]) {
       const auto name = output.value("name", std::string {});
       if (name == session.virtual_display_device_id || !connected(output)) {
@@ -1772,6 +1777,7 @@ namespace platf::linux_private_display {
         continue;
       }
       if (enabled(output)) {
+        physical_output_lit = true;
         const auto pos = output.value("pos", json::object());
         const auto [width, height] = logical_size(output);
         right_edge = std::max(right_edge, pos.value("x", 0) + width);
@@ -1802,7 +1808,6 @@ namespace platf::linux_private_display {
       arguments.push_back(target_prefix + "priority." + std::to_string(primary ? 1 : std::max(1, last_priority + 1)));
     }
 
-    const bool hdr_requested = rtsp_stream::effective_hdr_requested(session);
     const bool hdr_capable = output_hdr_capable(target_before, session.virtual_display_device_id);
     const auto hdr_policy = linux_hdr::resolve_output_state(
       parsed_hdr_state,
@@ -1895,7 +1900,7 @@ namespace platf::linux_private_display {
       return use_current_output();
     }
 
-    if (hdr_requested && !verified_hdr_enabled) {
+    if (rtsp_stream::hdr_capture_required(session, config::video) && !verified_hdr_enabled) {
       session.force_sdr = true;
     }
     log_mode_diagnostic("verified");
@@ -1903,9 +1908,22 @@ namespace platf::linux_private_display {
     session.virtual_display_ready_since = std::chrono::steady_clock::now();
     session.virtual_display_recreated_on_demand = false;
     session.virtual_display_needs_resume_apply = false;
+    bool needs_screen_hold = false;
     {
       std::lock_guard lock {manager.mutex};
       manager.newly_connected_reservations.erase(identity);
+      // A lit physical screen keeps normal idle behavior.
+      if (physical_output_lit) manager.retained_screen_hold.reset();
+      needs_screen_hold = !physical_output_lit && !manager.retained_screen_hold;
+    }
+    if (needs_screen_hold) {
+      auto hold = display_power::retain_screen();
+      std::lock_guard lock {manager.mutex};
+      // A restore may have completed while the helper became ready.
+      if (hold && manager.snapshot && !manager.retained_screen_hold) {
+        manager.retained_screen_hold = std::move(hold);
+        BOOST_LOG(info) << "Linux private display: blocking idle screen-off until the physical topology is restored.";
+      }
     }
     BOOST_LOG(info) << "Linux private display: applied private output " << session.virtual_display_device_id
                     << " at " << std::lround(target_scale * 100.0) << "% scale.";
@@ -1923,7 +1941,7 @@ namespace platf::linux_private_display {
     }
     const bool requested_hdr = rtsp_stream::effective_hdr_requested(session);
     const bool current_hdr = output_hdr_capable(output, session.virtual_display_device_id) && output->value("hdr", false);
-    if (requested_hdr && !current_hdr) session.force_sdr = true;
+    if (rtsp_stream::hdr_capture_required(session, config::video) && !current_hdr) session.force_sdr = true;
     session.virtual_display_hdr_enabled = requested_hdr && current_hdr;
     session.virtual_display_ready_since = std::chrono::steady_clock::now();
     return true;
@@ -2650,6 +2668,7 @@ namespace platf::linux_private_display {
     manager.snapshot_physical_identities.clear();
     manager.reservations.clear();
     manager.newly_connected_reservations.clear();
+    manager.retained_screen_hold.reset();
     BOOST_LOG(info) << "Linux private display: restored the pre-stream output topology.";
     return true;
   }
@@ -2858,6 +2877,7 @@ namespace platf::linux_private_display {
                 manager.snapshot_physical_identities.clear();
                 manager.reservations.clear();
                 manager.newly_connected_reservations.clear();
+                manager.retained_screen_hold.reset();
               }
               auto reset_generation = manager.reset_generation.load(std::memory_order_acquire);
               if (reset_generation && reset_generation <= claimed_generation && restore_allowed()) {

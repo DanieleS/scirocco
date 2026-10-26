@@ -98,7 +98,7 @@ int main() {
    session.framegen_refresh_millihz = requested;
    session.framegen_refresh_rate = framegen::rounded_fps_from_millihz(requested);
    session.framegen_refresh_multiplier = requested == 240000 ? 4 : 1;
-   helpers::resolve_virtual_display_refresh(video, session);
+   helpers::resolve_virtual_display_refresh(video, session, true);
    assert(rtsp_stream::effective_display_refresh_millihz(session) == expected);
    assert(session.fps == 60);
    assert(session.framegen_fixed_refresh == fixed);

@@ -22,11 +22,13 @@ def function(name):
 program = r'''
 #include <cassert>
 #include "tests/unit/display_helper_borrow_fixture.h"
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <iostream>
 #include <optional>
 #include <string>
+#include "src/platform/windows/display_helper_borrow_gate.h"
 #include "src/color_profile_policy.h"
 using HRESULT = std::int32_t;
 using LSTATUS = long;

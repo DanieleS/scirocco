@@ -35,6 +35,7 @@ def program(root):
     legacy_adapter = function(legacy, "bool apply_snapshot(const display_device::DisplaySettingsSnapshot &snap, const layout_rotation_map_t *layout_rotations = nullptr)")
     return r'''
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <iostream>
@@ -46,6 +47,7 @@ def program(root):
 #include <string>
 #include <thread>
 #include <vector>
+#include "src/platform/windows/display_helper_borrow_gate.h"
 #include "src/platform/windows/display_snapshot_restore.h"
 #include "tests/unit/display_helper_borrow_fixture.h"
 using namespace std::chrono_literals;

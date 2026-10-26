@@ -66,6 +66,7 @@
 
 #ifdef __linux__
   #include "platform/linux/private_display.h"
+  #include "platform/linux/rtx_hdr_runtime.h"
 #endif
 
 #ifdef _WIN32
@@ -983,6 +984,7 @@ namespace config {
     true,  // wgc_pacing_smoothing
     "1920x1080x60",  // fallback_mode
     false,  // ignore_encoder_probe_failure
+    true  // wgc_direct_encoder_input
   };
 
   audio_t audio {
@@ -1951,6 +1953,7 @@ namespace config {
 
     string_f(vars, "capture", video.capture);
     bool_f(vars, "wgc_pacing_smoothing", video.wgc_pacing_smoothing);
+    bool_f(vars, "wgc_direct_encoder_input", video.wgc_direct_encoder_input);
     string_f(vars, "encoder", video.encoder);
     const auto configured_encoder = video.encoder;
     video.encoder = std::string(nvenc::canonical_encoder_name(video.encoder));
@@ -2538,6 +2541,9 @@ namespace config {
     // Publish only after parsing and apply_config side effects succeed. Reset
     // and failed applies leave the preceding completed settings visible.
     g_hardware_metrics_config.publish({sunshine.hardware_metrics, sunshine.hardware_metrics_interval});
+#ifdef __linux__
+    platf::rtx_hdr::notify_live_settings_changed();
+#endif
   }
 
   int parse(int argc, char *argv[]) {

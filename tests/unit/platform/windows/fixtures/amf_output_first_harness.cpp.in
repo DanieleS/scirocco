@@ -190,6 +190,11 @@ namespace platf {
   };
 }  // namespace platf
 
+// The capture wait is exercised for AMF scheduling; geometry-change input is
+// an independent capture boundary and has no effect on this harness.
+template<class Event, class Display, class Config>
+void raise_touch_port_if_geometry_changed(const Event &, Display *, const Config &) {}
+
 namespace amf {
   struct amf_config {};
 
@@ -459,6 +464,9 @@ profile_result profile(int count, std::chrono::nanoseconds convert = 1ms) {
   };
   image_queue image_storage;
   auto *images = &image_storage;
+  std::shared_ptr<int> disp = std::make_shared<int>(0);
+  video::config_t config {};
+  int touch_port_event = 0;
   for (int i = 0; i < count; i++) {
     image_storage.arrivals.push_back(model_clock::time_point {} + 6ms + 7ms * i);
   }
@@ -467,11 +475,6 @@ profile_result profile(int count, std::chrono::nanoseconds convert = 1ms) {
   encode_amf(frame_nr++, s, packets, channel_data, {}, {}, {});
   auto encode_frame_threshold = 6060606ns;
   int skipped = 0;
-  // The image wait also fans out touch-port geometry, which this AMF timing model leaves inert.
-  [[maybe_unused]] struct {} touch_port_event;
-  [[maybe_unused]] struct { void *get() const { return nullptr; } } disp;
-  [[maybe_unused]] struct {} config;
-  [[maybe_unused]] auto raise_touch_port_if_geometry_changed = [](const auto &, void *, const auto &) {};
   for (int i = 0; i < count; i++) {
     if (!deliver_ready_amf_output()) {
       break;

@@ -451,7 +451,7 @@ namespace confighttp {
              key == "rtx_hdr_peak_brightness";
     }
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
     std::string encode_config_override_value(const nlohmann::json &value) {
       if (value.is_string()) {
         return value.get<std::string>();
@@ -648,7 +648,12 @@ namespace confighttp {
    * @param request The HTTP request object.
    */
   void print_req(const req_https_t &request) {
-    BOOST_LOG(debug) << "HTTP "sv << request->method << ' ' << request->path;
+    // Keep routine read polling available at Verbose. In particular, opening
+    // the logs page should not continually add Debug lines to the file it reads.
+    const bool polling = request->method == "GET" &&
+                         (request->path == "/api/logs" || request->path == "/api/configLocale");
+    auto &logger = polling ? verbose : debug;
+    BOOST_LOG(logger) << "HTTP "sv << request->method << ' ' << request->path;
 
     if (!request->header.empty()) {
       BOOST_LOG(verbose) << "Headers:"sv;
@@ -2150,7 +2155,7 @@ namespace confighttp {
 
       // Update apps file and refresh client cache
       confighttp::refresh_client_apps_cache(file_tree);
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
       const auto edited_uuid = input_tree.value("uuid", ""s);
       if (!edited_uuid.empty()) {
         (void) proc::proc.update_active_app_live_rtx_hdr_overrides(edited_uuid);
@@ -2167,7 +2172,7 @@ namespace confighttp {
     }
   }
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
   void updateAppRtxHdrLive(resp_https_t response, req_https_t request) {
     if (!check_content_type(response, request, "application/json")) {
       return;
@@ -2716,6 +2721,12 @@ namespace confighttp {
 
   void refresh_remote_display_physical_baseline() {
     try {
+#ifdef _WIN32
+      // An inventory read must not replace a live stream's captured baseline.
+      if (remote_display_topology::instance().managed_client_identity_count() != 0) {
+        return;
+      }
+#endif
       const auto devices = nlohmann::json::parse(display_helper_integration::enumerate_devices_json(display_device::DeviceEnumerationDetail::Full));
       if (!devices.is_array()) return;
       std::vector<remote_display_topology::node_t> nodes;
@@ -2733,11 +2744,33 @@ namespace confighttp {
         node.label = label;
         node.physical = true;
         const auto info = device.value("info", nlohmann::json::object());
+#ifdef _WIN32
+        if (!info.is_object() || !info.value("active", true)) {
+          continue;
+        }
+#endif
         node.active = info.value("active", true);
         node.primary = info.value("primary", false);
+#ifdef _WIN32
+        // The coordinator may later apply this baseline. A missing origin
+        // must never silently become (0,0) for a second physical monitor.
+        if (!info.contains("origin_point") || !info["origin_point"].is_object() || !info["origin_point"].contains("x") || !info["origin_point"].contains("y") || !info["origin_point"]["x"].is_number_integer() || !info["origin_point"]["y"].is_number_integer()) {
+          continue;
+        }
+        node.device_id = id;
+        node.preexisting = true;
+        node.x = info["origin_point"]["x"].get<int>();
+        node.y = info["origin_point"]["y"].get<int>();
+        if (info.contains("resolution") && info["resolution"].is_object()) {
+          node.configured_mode.width = info["resolution"].value("width", node.configured_mode.width);
+          node.configured_mode.height = info["resolution"].value("height", node.configured_mode.height);
+        }
+#endif
         nodes.push_back(std::move(node));
       }
-      remote_display_topology::instance().set_physical_baseline(std::move(nodes));
+      // Recheck ownership under the coordinator lock: a stream may have started
+      // while the Devices page was enumerating displays.
+      remote_display_topology::instance().refresh_idle_physical_baseline(std::move(nodes));
     } catch (const std::exception &e) {
       BOOST_LOG(warning) << "Remote display layout could not refresh physical monitor baseline: " << e.what();
     }
@@ -3209,6 +3242,26 @@ namespace confighttp {
     output_tree["providers"]["lutris"] = true;
     output_tree["providers"]["mangohud"] = true;
     const char *session_role = std::getenv("VIBEPOLLO_SESSION_ROLE");
+    // Read PCI identity without probing encoders or touching the active compositor.
+    bool has_nvidia = false, has_amd = false, has_intel = false;
+    std::error_code gpu_error;
+    for (const auto &entry : std::filesystem::directory_iterator("/sys/class/drm", gpu_error)) {
+      if (entry.path().filename().string().rfind("renderD", 0) != 0) continue;
+      std::ifstream vendor_file(entry.path() / "device/vendor");
+      unsigned vendor = 0;
+      if (!(vendor_file >> std::hex >> vendor)) continue;
+      has_nvidia |= vendor == 0x10de;
+      has_amd |= vendor == 0x1002 || vendor == 0x1022;
+      has_intel |= vendor == 0x8086;
+    }
+    output_tree["has_nvidia_gpu"] = has_nvidia;
+    output_tree["has_amd_gpu"] = has_amd;
+    output_tree["has_intel_gpu"] = has_intel;
+#ifdef SUNSHINE_ENABLE_NV_TRUEHDR
+    output_tree["rtx_hdr_supported"] = has_nvidia;
+#else
+    output_tree["rtx_hdr_supported"] = false;
+#endif
     const std::string role = session_role ? session_role : "unknown";
     output_tree["linux"] = {{"session_role", role == "desktop" || role == "greeter" ? role : "unknown"}};
     const char *machine_host = std::getenv("VIBEPOLLO_MACHINE_HOST");
@@ -6795,7 +6848,7 @@ namespace confighttp {
     register_api_route("^/api/apps/delete$", "POST", deleteApp);
     register_blocking_api_route("^/api/apps/launch$", "POST", launchApp, nullptr, true);
     register_api_route("^/api/apps/close$", "POST", closeApp);
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
     register_api_route("^/api/apps/rtx_hdr/live$", "POST", updateAppRtxHdrLive);
 #endif
     register_api_route("^/api/logs$", "GET", getLogs);

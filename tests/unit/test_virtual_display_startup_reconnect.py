@@ -311,14 +311,12 @@ void production_mutation(Time display_startup_deadline, std::function<bool()> di
   auto apply_virtual_display_request = [&](bool requested) { if (requested) ++mutations; };
 ''' + mutation_gate + '\n' + mutation_call + r'''
 }
-bool first_launch_tv_off(Time deadline) {
+bool first_launch_tv_off(Time deadline, bool include_identity_log_fields) {
   bool request_virtual_display = false, preserve_requested_output = false;
   [[maybe_unused]] bool has_app_output_override = false, pinned_virtual_display_mode_disabled = false;
   [[maybe_unused]] std::optional<std::string> app_output_override, pending_output_override;
   struct TVSession { std::optional<std::string> output_name_override, virtual_display_mode_override; };
   [[maybe_unused]] TVSession session, *launch_session = &session;
-  // The resolver parameter that decides whether logs may name the dropped output.
-  [[maybe_unused]] const bool include_identity_log_fields = true;
 ''' + tv_block + r'''
   return request_virtual_display && admit(deadline, [=] { return fake_now >= deadline; });
 }
@@ -333,10 +331,12 @@ void reset() {
 }
 int main() {
 ''' + (ordered_tests if preflight else '') + r'''
-  reset();
-  require(first_launch_tv_off(fake_now + 2s), "TV-off first launch did not recover its stale pipe");
-  require(fast_calls == 2 && reset_calls == 1 && ping_calls == 1 && !g_restore_expected && killed == 0,
-          "successful reconnect did not dispatch exactly one retry and clear restore guard");
+  for (bool include_identity_log_fields : {true, false}) {
+    reset();
+    require(first_launch_tv_off(fake_now + 2s, include_identity_log_fields), "TV-off first launch did not recover its stale pipe");
+    require(fast_calls == 2 && reset_calls == 1 && ping_calls == 1 && !g_restore_expected && killed == 0,
+            "successful reconnect did not dispatch exactly one retry and clear restore guard");
+  }
   reset(); ping_ok = false; g_last_revert_us = now_steady_us();
   require(!admit(fake_now + 2s, [] { return false; }) && g_restore_expected && killed == 0,
           "failed admission erased guard or killed a restoring helper");
@@ -682,10 +682,10 @@ void prepare_resume(ResumeSession &session, bool request_virtual_display) {
   bool retained_resume_recovery_rearm = false;
   std::string virtual_display_stable_id, virtual_display_stable_guid;
   std::optional<std::string> pending_output_override, app_output_override;
+  const bool include_identity_log_fields = true;
   auto reserve_normal_vdd_identity = [] { return identity_available; };
   auto apply_framegen_refresh_policy = [](bool) {};
   const auto display_startup_deadline = fake_now + 2s;
-  [[maybe_unused]] const bool include_identity_log_fields = true;
   const std::function<bool()> display_startup_cancelled = [] { return false; };
   [[maybe_unused]] const std::function<void()> disarm_startup_restore = [&] {
     (void) display_helper_integration::disarm_pending_restore(display_startup_cancelled, display_startup_deadline, true);
