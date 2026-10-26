@@ -15,6 +15,8 @@ def main():
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--build", type=Path, required=True)
     parser.add_argument("--product", choices=("Vibeshine", "Vibepollo"), required=True)
+    # The host prints the brand the build puts in place of upstream's product name.
+    parser.add_argument("--brand", default="Scirocco")
     parser.add_argument("--version", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -71,7 +73,7 @@ def main():
             # still work even though the optional NGX DLL imports nvcuda.dll.
             result = subprocess.run([str(stage / "sunshine.exe"), "--version"],
                                     check=True, capture_output=True, text=True, timeout=30)
-            if f"{args.product} version: {args.version}" not in result.stdout:
+            if f"{args.brand} version: {args.version}" not in result.stdout:
                 raise ValueError(f"Unexpected portable host version output: {result.stdout!r}")
     args.output.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(archive, args.output / archive.name)
