@@ -1020,6 +1020,32 @@ namespace rtsp_stream {
       }
     }
 
+    // Caller holds the lifecycle gate. Retire only the same unpublished
+    // monitor launch whose start returned before control registration.
+    void retire_failed_monitor_start_locked(const std::shared_ptr<launch_session_t> &expected) {
+      if (!expected || expected->role != remote_session::role_e::monitor) return;
+      std::shared_ptr<launch_session_t> retired;
+      bool pending_launches_remain = false;
+      {
+        std::lock_guard lock {_launch_sessions_mutex};
+        const auto it = std::find_if(_launch_sessions.begin(), _launch_sessions.end(), [&](const auto &entry) {
+          return entry.session && entry.session->id == expected->id;
+        });
+        if (it == _launch_sessions.end()) return;
+        const auto &pending = it->session;
+        if (pending->unique_id != expected->unique_id || pending->client_uuid != expected->client_uuid ||
+            pending->role != expected->role || pending->role_generation != expected->role_generation ||
+            pending->monitor_stream_published) return;
+        retired = std::move(it->session);
+        _launch_sessions.erase(it);
+        pending_launches_remain = !_launch_sessions.empty();
+      }
+      if (!pending_launches_remain) set_pending_vulkan_hdr_layer_stream(false);
+      release_pending_runtime_holds(retired);
+      reconcile_abandoned_monitor_locked(retired);
+      // run_startup's finish_startup retains this worker's GUID for cleanup.
+    }
+
     void retry_abandoned_monitor(const std::shared_ptr<launch_session_t> &pending) {
       if (stopping.load(std::memory_order_acquire)) return;
       auto timer = std::make_shared<boost::asio::steady_timer>(io_context, std::chrono::milliseconds(100));
@@ -2762,12 +2788,15 @@ namespace rtsp_stream {
         std::shared_ptr<stream::session_t> stream_session;
         bool startup_failed = true;
         int startup_status = 500;
+        bool failed_before_control_registration = false;
         std::string startup_error;
 
         try {
           stream_session = stream::session::alloc(config, *launch_session);
           const auto result = stream::session::start(*stream_session, remote_address);
           startup_failed = result != 0;
+          // Both explicit error returns precede control registration.
+          failed_before_control_registration = result == -1 || result == stream::session::START_PACING_REJECTED;
           if (result == stream::session::START_PACING_REJECTED) {
             startup_status = 400;
             startup_error = "Requested video demand cannot fit the configured pacing ceiling with FEC and packet headers";
@@ -2786,6 +2815,7 @@ namespace rtsp_stream {
           server->insert(stream_session, client_uuid, stream_session && stream_hdr_enabled);
           if (session->role == remote_session::role_e::monitor) session->monitor_stream_published = true;
         }
+        if (failed_before_control_registration) server->retire_failed_monitor_start_locked(launch_session);
         // Ownership is published, so drop the gate before the local reference goes out of
         // scope. A failed start can hold the last reference, and ~session_t may then run
         // end_broadcast(), which joins a control thread that itself waits on this gate.
