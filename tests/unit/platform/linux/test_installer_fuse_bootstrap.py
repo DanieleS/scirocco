@@ -20,6 +20,9 @@ COMMANDS = None
 ROOT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).resolve().parents[4]
 BRAND = sys.argv[2] if len(sys.argv) > 2 else 'vibepollo'
 MIGRATION = 'upgrade-2.0.2-fuse-scan.sh'
+# Fork: the package hooks run in a few seconds alone, but on a CI runner busy with ~270 parallel
+# tests post_upgrade once took over 15 s and failed a release build.
+HOOK_TIMEOUT = 60
 installed = BRAND + ' 2.0.2daily.d20261017.2.416e6dec2b51.r416e6dec2b515b2e0f38f6329397a4d393dcd94f-1'
 source = (ROOT / f'packaging/linux/Arch/{BRAND}.install').read_text()
 old = gzip.decompress((ROOT / f'tests/unit/platform/linux/fixtures/package-2.0.2-fuse/{BRAND}.install.gz').read_bytes())
@@ -281,7 +284,7 @@ stage_upgrade_guard {shlex.quote(str(modeled))} {shlex.quote(str(outgoing))}
         else:
             replacement.write_bytes(b'new package payload')
             operation = 'post_upgrade'
-        result = subprocess.run(['bash', '-c', 'source "$1"; ' + operation, 'fixture', str(base / 'workdir/arch-package-hooks')], env=dict(os.environ, **environment), capture_output=True, text=True, timeout=15)
+        result = subprocess.run(['bash', '-c', 'source "$1"; ' + operation, 'fixture', str(base / 'workdir/arch-package-hooks')], env=dict(os.environ, **environment), capture_output=True, text=True, timeout=HOOK_TIMEOUT)
         assert result.returncode == 0 and 'not found' not in result.stderr, (case, result.stdout, result.stderr)
         if case != 'failed-transaction':
             assert (base / 'events').read_text().splitlines() == ['secure', 'configure']
@@ -293,10 +296,10 @@ stage_upgrade_guard {shlex.quote(str(modeled))} {shlex.quote(str(outgoing))}
         assert outgoing.read_bytes() == old
         if case == 'failed-transaction':
             environment[BRAND.upper() + '_PACKAGE_RUN_ID'] = '2' * 32
-            result = subprocess.run([str(base / 'workdir/preflight')], env=dict(os.environ, **environment), capture_output=True, text=True, timeout=15)
+            result = subprocess.run([str(base / 'workdir/preflight')], env=dict(os.environ, **environment), capture_output=True, text=True, timeout=HOOK_TIMEOUT)
             assert result.returncode == 0, result.stderr
             replacement.write_bytes(b'retry package payload')
-            result = subprocess.run(['bash', '-c', 'source "$1"; post_upgrade', 'fixture', str(base / 'workdir/arch-package-hooks')], env=dict(os.environ, **environment), capture_output=True, text=True, timeout=15)
+            result = subprocess.run(['bash', '-c', 'source "$1"; post_upgrade', 'fixture', str(base / 'workdir/arch-package-hooks')], env=dict(os.environ, **environment), capture_output=True, text=True, timeout=HOOK_TIMEOUT)
             assert result.returncode == 0, result.stderr
             assert (base / 'events').read_text().splitlines() == ['secure', 'configure']
             assert not (base / 'runtime-package-transaction').exists()
