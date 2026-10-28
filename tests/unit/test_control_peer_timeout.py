@@ -162,6 +162,7 @@ struct session_t {
   std::atomic_bool client_disconnected {false};
   struct { ENetPeer *peer = nullptr; std::uint32_t enet_recv_baseline = 0; std::string expected_peer_address; } control;
   struct { int controlProtocolType = 0; } config;
+  struct { bool enabled = false; } roaming;
   int input = 0;
   std::shared_ptr<event_t> shutdown_event = std::make_shared<event_t>();
   event_t controlEnd;
@@ -182,6 +183,9 @@ struct control_server_t {
     auto it = _peer_to_session->find(peer); return it == _peer_to_session->end() ? nullptr : it->second;
   }
   void call(std::uint16_t, session_t *, std::string_view, bool) { ++callbacks; }
+  struct { void set_stopping(std::uintptr_t) {} } _roaming;
+  void roaming_add(session_t *, ENetPeer *) {}
+  void roaming_remove(session_t *) {}
   void iterate(std::chrono::milliseconds timeout);
 };
 ''' + iterate + r'''

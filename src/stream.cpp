@@ -2681,11 +2681,11 @@ namespace stream {
   }
 
   /// The host address video is sent from: the control connection's, unless the session roamed.
-  static const boost::asio::ip::address &video_local_address(const session_t &session) {
+  static boost::asio::ip::address &video_local_address(session_t &session) {
     return session.video.roam_applied ? session.video.roam_local_address : session.localAddress;
   }
 
-  static const boost::asio::ip::address &audio_local_address(const session_t &session) {
+  static boost::asio::ip::address &audio_local_address(session_t &session) {
     return session.audio.roam_applied ? session.audio.roam_local_address : session.localAddress;
   }
 
@@ -2802,7 +2802,8 @@ namespace stream {
         wire_timeline_state.cached_link_bps = 0;
         wire_timeline_state.cached_interface_id = 0;
         session->video.qos.reset();
-        session->video.qos = platf::enable_socket_qos(sock.native_handle(), session->video.peer.address(), session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
+        auto video_qos_peer = session->video.peer.address();
+        session->video.qos = platf::enable_socket_qos(sock.native_handle(), video_qos_peer, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
       }
       packet_queue_latency_logger.collect_and_log(std::chrono::duration<double, std::milli>(packet_pop_timestamp - packet->packet_enqueue_timestamp).count());
       if (packet->frame_timestamp) {
@@ -3593,7 +3594,8 @@ namespace stream {
       }
       if (roaming_path == roaming_path_e::changed) {
         session->audio.qos.reset();
-        session->audio.qos = platf::enable_socket_qos(sock.native_handle(), session->audio.peer.address(), session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
+        auto audio_qos_peer = session->audio.peer.address();
+        session->audio.qos = platf::enable_socket_qos(sock.native_handle(), audio_qos_peer, session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
       }
 
       auto sequenceNumber = session->audio.sequenceNumber;

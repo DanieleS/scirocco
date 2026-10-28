@@ -209,6 +209,7 @@ namespace stream {
     collection_t<std::vector<session_t *>> _sessions;
     collection_t<std::map<peer_t *, session_t *>> _peer_to_session;
     std::shared_ptr<host_t> _host = std::make_shared<host_t>();
+    void roaming_remove(session_t *) {}
     /* PRODUCTION_SEND_METHOD */
     /* PRODUCTION_FLUSH_METHOD */
   };
