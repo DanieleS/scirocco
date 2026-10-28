@@ -36,6 +36,7 @@ extern "C" {
 #include "app_audio_termination.h"
 #include "capture_action.h"
 #include "config.h"
+#include "client_roaming.h"
 #include "focus_hints.h"
 #include "host_stream_control.h"
 #include "globals.h"
@@ -217,6 +218,7 @@ namespace rtsp_stream {
     snapshot->iv = iv;
     snapshot->av_ping_payload = av_ping_payload;
     snapshot->control_connect_data = control_connect_data;
+    snapshot->client_roaming_offered = client_roaming_offered;
     snapshot->unique_id = unique_id;
     snapshot->client_uuid = client_uuid;
     snapshot->client_name = client_name;
@@ -2085,6 +2087,13 @@ namespace rtsp_stream {
     // Dynamic FEC (video_fec.h). Clients that don't know it ignore the attribute, and nothing
     // changes for a session unless the client answers in its ANNOUNCE.
     ss << "a=x-ss-video[0].fecControlVersion:1"sv << std::endl;
+
+    // Client roaming (client_roaming.h), only when enabled. The host does nothing until an
+    // authenticated PROBE arrives, and a client that doesn't know the attribute ignores it.
+    if (config::stream.client_roaming) {
+      ss << client_roaming::sdp_attribute << std::endl;
+      session->client_roaming_offered = true;
+    }
 
     if (video::last_encoder_probe_supported_ref_frames_invalidation) {
       ss << "a=x-nv-video[0].refPicInvalidation:1"sv << std::endl;

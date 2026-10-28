@@ -30,6 +30,7 @@ namespace {
     ls.iv = crypto::aes_t {0x05, 0x06, 0x07, 0x08};
     ls.av_ping_payload = "ping-payload";
     ls.control_connect_data = 0xABCDu;
+    ls.client_roaming_offered = true;
     ls.unique_id = "unique-id";
     ls.client_uuid = "client-uuid";
     ls.client_name = "client-name";
@@ -85,6 +86,7 @@ TEST(RtspStartupSnapshot, CopiesAllConsumedFields) {
   EXPECT_EQ(clone->iv, source.iv);
   EXPECT_EQ(clone->av_ping_payload, source.av_ping_payload);
   EXPECT_EQ(clone->control_connect_data, source.control_connect_data);
+  EXPECT_EQ(clone->client_roaming_offered, source.client_roaming_offered);
   EXPECT_EQ(clone->unique_id, source.unique_id);
   EXPECT_EQ(clone->client_uuid, source.client_uuid);
   EXPECT_EQ(clone->client_name, source.client_name);

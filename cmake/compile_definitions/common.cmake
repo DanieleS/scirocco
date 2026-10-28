@@ -80,6 +80,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/entry_handler.h"
         "${CMAKE_SOURCE_DIR}/src/entry_metadata.cpp"
         "${CMAKE_SOURCE_DIR}/src/entry_metadata.h"
+        "${CMAKE_SOURCE_DIR}/src/client_roaming.cpp"
+        "${CMAKE_SOURCE_DIR}/src/client_roaming.h"
         "${CMAKE_SOURCE_DIR}/src/focus_hints.cpp"
         "${CMAKE_SOURCE_DIR}/src/focus_hints.h"
         "${CMAKE_SOURCE_DIR}/src/file_handler.cpp"

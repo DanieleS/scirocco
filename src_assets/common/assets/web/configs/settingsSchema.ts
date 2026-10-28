@@ -1044,6 +1044,7 @@ export const settingsCategories: SettingsCategory[] = [
           text('external_ip', { monospace: true, stacked: true }),
           number('ping_timeout', { min: 0, step: 1 }),
           number('control_peer_timeout', { min: 0, max: 86399999, step: 1 }),
+          boolean('client_roaming'),
         ],
       },
       {
@@ -1306,6 +1307,7 @@ export const settingsDefaults: Record<string, unknown> = {
   external_ip: '',
   ping_timeout: 10000,
   control_peer_timeout: 0,
+  client_roaming: false,
   lan_encryption_mode: 0,
   wan_encryption_mode: 1,
   csrf_allowed_origins: '',
