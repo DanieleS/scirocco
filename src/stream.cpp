@@ -42,6 +42,7 @@ extern "C" {
 
 // local includes
 #include "capture_action.h"
+#include "client_roaming.h"
 #include "config.h"
 #include "control_peer_timeout.h"
 #include "crypto.h"
@@ -529,13 +530,166 @@ namespace stream {
     }
   }
 
+  // ---- Client roaming (client_roaming.h) ----
+
+  /**
+   * What the control thread hands to the media threads when a client roams. The video and audio
+   * sender threads own `session->video.peer` / `audio.peer`, so the control thread never writes them:
+   * a commit bumps `generation` and publishes the validated IP, which clears the media destinations
+   * (a sender that sees `video_ready != generation` sends nothing); the receive thread then
+   * publishes the endpoint of the first session ping from that IP, and the sender picks it up at its
+   * next frame (or audio packet).
+   */
+  struct roaming_path_t {
+    std::string ping_payload;  ///< The session's 16-byte ping payload (video and audio use the same).
+    safe::mail_raw_t::event_t<bool> idr_events;
+
+    std::atomic<std::uint32_t> generation {0};  ///< Number of commits; 0 = never roamed.
+    std::atomic<std::uint32_t> video_ready {0};  ///< Generation whose video endpoint is published.
+    std::atomic<std::uint32_t> audio_ready {0};
+
+    std::mutex mutex;  ///< Guards what follows.
+    std::array<std::uint8_t, 16> ip {};  ///< Validated client IP (canonical), pings from elsewhere are ignored.
+    boost::asio::ip::address local;  ///< Host address the CONFIRM arrived on.
+    udp::endpoint video_peer;
+    udp::endpoint audio_peer;
+  };
+
+  struct roaming_registry_t {
+    std::mutex mutex;
+    std::vector<std::weak_ptr<roaming_path_t>> paths;
+  };
+
+  static roaming_registry_t &roaming_registry() {
+    static roaming_registry_t registry;
+    return registry;
+  }
+
+  static void roaming_register(const std::shared_ptr<roaming_path_t> &path) {
+    auto &registry = roaming_registry();
+    std::lock_guard lg {registry.mutex};
+    std::erase_if(registry.paths, [](const std::weak_ptr<roaming_path_t> &known) {
+      return known.expired();
+    });
+    registry.paths.push_back(path);
+  }
+
+  static std::array<std::uint8_t, 16> roaming_canonical_ip(const boost::asio::ip::address &address) {
+    std::array<std::uint8_t, 16> ip {};
+    if (address.is_v4()) {
+      ip[10] = ip[11] = 0xff;
+      const auto bytes = address.to_v4().to_bytes();
+      std::copy(bytes.begin(), bytes.end(), ip.begin() + 12);
+    } else {
+      ip = address.to_v6().to_bytes();
+    }
+    return ip;
+  }
+
+  static boost::asio::ip::address roaming_address(const std::array<std::uint8_t, 16> &ip) {
+    boost::asio::ip::address_v6 v6 {ip};
+    if (v6.is_v4_mapped()) {
+      return boost::asio::ip::make_address_v4(boost::asio::ip::v4_mapped, v6);
+    }
+    return v6;
+  }
+
+  static std::optional<client_roaming::endpoint_t> roaming_endpoint(const sockaddr *address) {
+    client_roaming::endpoint_t endpoint;
+    if (address->sa_family == AF_INET) {
+      const auto *in = reinterpret_cast<const sockaddr_in *>(address);
+      endpoint.ip[10] = endpoint.ip[11] = 0xff;
+      std::memcpy(endpoint.ip.data() + 12, &in->sin_addr, 4);
+      endpoint.port = ntohs(in->sin_port);
+    } else if (address->sa_family == AF_INET6) {
+      const auto *in6 = reinterpret_cast<const sockaddr_in6 *>(address);
+      std::memcpy(endpoint.ip.data(), &in6->sin6_addr, 16);
+      endpoint.port = ntohs(in6->sin6_port);
+    } else {
+      return std::nullopt;
+    }
+    return endpoint;
+  }
+
+  static std::string roaming_text(const client_roaming::endpoint_t &endpoint) {
+    return roaming_address(endpoint.ip).to_string() + ':' + std::to_string(endpoint.port);
+  }
+
+  /**
+   * @brief A session ping on the video or audio socket. Only a session that roamed is affected: the
+   *        first ping with its own payload from its validated IP (any port) sets the new destination.
+   * @details The legacy 4-byte PING never gets here, and after a commit it can't take the media over.
+   */
+  static void roaming_media_ping(socket_e type, const udp::endpoint &peer, std::string_view payload) {
+    std::shared_ptr<roaming_path_t> path;
+    {
+      auto &registry = roaming_registry();
+      std::lock_guard lg {registry.mutex};
+      for (const auto &weak : registry.paths) {
+        if (auto known = weak.lock(); known && known->ping_payload == payload) {
+          path = std::move(known);
+          break;
+        }
+      }
+    }
+    if (!path) {
+      return;
+    }
+
+    std::lock_guard lg {path->mutex};
+    const auto generation = path->generation.load(std::memory_order_acquire);
+    if (generation == 0 || roaming_canonical_ip(peer.address()) != path->ip) {
+      return;
+    }
+    auto &ready = type == socket_e::video ? path->video_ready : path->audio_ready;
+    if (ready.load(std::memory_order_relaxed) == generation) {
+      return;
+    }
+    (type == socket_e::video ? path->video_peer : path->audio_peer) = peer;
+    ready.store(generation, std::memory_order_release);
+    BOOST_LOG(info) << "Client roaming: "sv << (type == socket_e::video ? "video"sv : "audio"sv) << " now sent to "sv
+                    << peer.address().to_string() << ':' << peer.port();
+    if (type == socket_e::video && path->idr_events) {
+      path->idr_events->raise(true);
+    }
+  }
+
+  class control_server_t;
+  static std::atomic<control_server_t *> roaming_server {nullptr};
+
   class control_server_t {
   public:
+    ~control_server_t() {
+      auto self = this;
+      roaming_server.compare_exchange_strong(self, nullptr);
+    }
+
     int bind(net::af_e address_family, std::uint16_t port) {
       _host = net::host_create(address_family, _addr, port);
 
+      if (_host) {
+        // Roaming datagrams share the control port with ENet and are handled before it parses them.
+        roaming_server.store(this, std::memory_order_release);
+        _host->intercept = &control_server_t::roaming_intercept;
+      }
+
       return !(bool) _host;
     }
+
+    static int roaming_intercept(ENetHost *host, ENetEvent *event);
+    int on_raw_datagram(ENetHost *host);
+    void handle_roaming_datagram(ENetHost *host);
+    void commit_roam(session_t *session, const client_roaming::result_t &result, ENetHost *host);
+    void roaming_add(session_t *session, ENetPeer *peer);
+    void roaming_remove(session_t *session);
+
+    // Control thread only.
+    client_roaming::table_t _roaming;
+    std::size_t _roamed_sessions = 0;
+    std::chrono::steady_clock::time_point _roaming_refusal_log_next {};
+    unsigned _roaming_refusals_suppressed = 0;
+    std::optional<client_roaming::endpoint_t> _stale_log_address;
+    std::chrono::steady_clock::time_point _stale_log_next {};
 
     // Get session associated with address.
     // If none are found, try to find a session not yet claimed. (It will be marked by a port of value 0
@@ -668,6 +822,11 @@ namespace stream {
       std::atomic<int> pacing_bitrate_kbps {0};
 
       std::unique_ptr<platf::deinit_t> qos;
+
+      // Client roaming, written by the video sender thread only: the generation of the path in use
+      // and, once it has changed, the host address that path is sent from.
+      std::uint32_t roam_applied = 0;
+      boost::asio::ip::address roam_local_address;
     } video;
 
     struct {
@@ -685,7 +844,23 @@ namespace stream {
 
       audio_fec_packet_t fec_packet;
       std::unique_ptr<platf::deinit_t> qos;
+
+      // As video.roam_*, for the audio sender thread.
+      std::uint32_t roam_applied = 0;
+      boost::asio::ip::address roam_local_address;
     } audio;
+
+    // Client roaming (client_roaming.h). `enabled` is fixed by alloc(): DESCRIBE offered it to this
+    // launch and the client sent ML_FF_SESSION_ID_V1.
+    struct {
+      bool enabled = false;
+      client_roaming::rikey_t rikey {};
+      std::shared_ptr<roaming_path_t> path;
+
+      // Control thread only.
+      bool roamed = false;
+      client_roaming::endpoint_t validated;
+    } roaming;
 
     struct {
       crypto::cipher::gcm_t cipher;
@@ -1114,6 +1289,7 @@ namespace stream {
         // lifecycle -> control-session lock order used by session startup.
         auto ptslg = _peer_to_session.lock();
         _peer_to_session->emplace(peer, session_p);
+        roaming_add(session_p, peer);
         matched_session = session_p;
         matched_launch_session_id = session_p->launch_session_id;
         break;
@@ -1128,6 +1304,163 @@ namespace stream {
     // be torn down without holding the control-session collection lock.
     rtsp_stream::launch_session_clear(matched_launch_session_id);
     return matched_session;
+  }
+
+  void control_server_t::roaming_add(session_t *session, ENetPeer *peer) {
+    if (!session->roaming.enabled) {
+      return;
+    }
+    const auto current = roaming_endpoint(reinterpret_cast<const sockaddr *>(&peer->address.address));
+    if (!current) {
+      return;
+    }
+    session->roaming.validated = *current;
+    session->roaming.roamed = false;
+    _roaming.insert(reinterpret_cast<std::uintptr_t>(session), session->roaming.rikey, *current);
+  }
+
+  void control_server_t::roaming_remove(session_t *session) {
+    if (!session->roaming.enabled) {
+      return;
+    }
+    if (session->roaming.roamed) {
+      session->roaming.roamed = false;
+      if (_roamed_sessions > 0) {
+        --_roamed_sessions;
+      }
+    }
+    _roaming.remove(reinterpret_cast<std::uintptr_t>(session));
+  }
+
+  int control_server_t::roaming_intercept(ENetHost *host, ENetEvent *) {
+    auto *server = roaming_server.load(std::memory_order_acquire);
+    // Without a session that was offered roaming nothing is touched: the datagram goes to ENet as before.
+    if (!server || host != server->_host.get() || server->_roaming.empty()) {
+      return 0;
+    }
+    return server->on_raw_datagram(host);
+  }
+
+  int control_server_t::on_raw_datagram(ENetHost *host) {
+    const auto *data = static_cast<const std::uint8_t *>(host->receivedData);
+    const std::size_t size = host->receivedDataLength;
+    if (!data || size < 2) {
+      return 0;
+    }
+
+    if (size >= client_roaming::magic.size() && std::equal(client_roaming::magic.begin(), client_roaming::magic.end(), data)) {
+      handle_roaming_datagram(host);
+      return 1;  // consumed, whether it was answered or refused
+    }
+
+    // A session that roamed ignores datagrams from any address but its validated one, so the old path
+    // can't flip the ENet peer back. Sessions that never roamed are left as ENet has always had them.
+    if (_roamed_sessions == 0) {
+      return 0;
+    }
+    const unsigned peer_id = ((data[0] << 8) | data[1]) & 0x0FFF;
+    if (peer_id == 0x0FFF || peer_id >= host->peerCount) {
+      return 0;
+    }
+    session_t *session = nullptr;
+    {
+      auto ptslg = _peer_to_session.lock();
+      auto it = _peer_to_session->find(&host->peers[peer_id]);
+      if (it != _peer_to_session->end()) {
+        session = it->second;
+      }
+    }
+    if (!session || !session->roaming.roamed) {
+      return 0;
+    }
+    const auto from = roaming_endpoint(reinterpret_cast<const sockaddr *>(&host->receivedPeerAddress.address));
+    if (!from || *from == session->roaming.validated) {
+      return 0;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (_stale_log_address != from || now >= _stale_log_next) {
+      _stale_log_address = from;
+      _stale_log_next = now + 5s;
+      BOOST_LOG(debug) << "Client roaming: dropping control datagram from "sv << roaming_text(*from)
+                       << ", the session moved to "sv << roaming_text(session->roaming.validated);
+    }
+    return 1;
+  }
+
+  void control_server_t::handle_roaming_datagram(ENetHost *host) {
+    const auto from = roaming_endpoint(reinterpret_cast<const sockaddr *>(&host->receivedPeerAddress.address));
+    if (!from) {
+      return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    auto result = _roaming.on_datagram(
+      now,
+      *from,
+      static_cast<const std::uint8_t *>(host->receivedData),
+      host->receivedDataLength
+    );
+
+    if (result.type == client_roaming::result_t::type_t::refused) {
+      // Refusals are never answered, and logged at most once per 10 s.
+      if (now >= _roaming_refusal_log_next) {
+        BOOST_LOG(debug) << "Client roaming: refused a datagram from "sv << roaming_text(*from) << ": "sv
+                         << client_roaming::to_string(result.refusal)
+                         << (_roaming_refusals_suppressed ? " ("s + std::to_string(_roaming_refusals_suppressed) + " more suppressed)"s : ""s);
+        _roaming_refusal_log_next = now + 10s;
+        _roaming_refusals_suppressed = 0;
+      } else {
+        ++_roaming_refusals_suppressed;
+      }
+      return;
+    }
+
+    // Only a running session with a connected control peer takes part.
+    auto *session = reinterpret_cast<session_t *>(result.id);
+    if (session->state.load(std::memory_order_acquire) != session::state_e::RUNNING || !session->control.peer) {
+      _roaming.set_stopping(result.id);
+      return;
+    }
+
+    if (result.type == client_roaming::result_t::type_t::commit) {
+      commit_roam(session, result, host);
+    }
+
+    // One datagram of the request's size, to the request's source address.
+    ENetBuffer buffer;
+    buffer.data = result.datagram.data();
+    buffer.dataLength = result.datagram.size();
+    enet_socket_send(host->socket, &host->receivedPeerAddress, &host->receivedLocalAddress, &buffer, 1);
+  }
+
+  void control_server_t::commit_roam(session_t *session, const client_roaming::result_t &result, ENetHost *host) {
+    if (!session->roaming.roamed) {
+      session->roaming.roamed = true;
+      ++_roamed_sessions;
+    }
+    session->roaming.validated = result.new_address;
+
+    // Control traffic follows: ENet takes the peer's address from the datagrams it receives.
+    session->control.peer->address = host->receivedPeerAddress;
+    session->control.peer->localAddress = host->receivedLocalAddress;
+
+    if (auto path = session->roaming.path) {
+      auto local = session->localAddress;
+      try {
+        local = boost::asio::ip::make_address(platf::from_sockaddr(reinterpret_cast<sockaddr *>(&host->receivedLocalAddress.address)));
+      } catch (const boost::system::system_error &) {
+      }
+
+      // Clears the media destinations: nothing is sent until a ping from the new IP arrives.
+      std::lock_guard lg {path->mutex};
+      path->ip = result.new_address.ip;
+      path->local = local;
+      path->generation.fetch_add(1, std::memory_order_release);
+    }
+
+    BOOST_LOG(info) << "client roamed "sv << roaming_text(result.old_address) << " -> "sv << roaming_text(result.new_address)
+                    << (result.media_rebound ? " (media sockets rebound)"sv : ""sv);
   }
 
   /**
@@ -1203,6 +1536,9 @@ namespace stream {
         case ENET_EVENT_TYPE_DISCONNECT:
           BOOST_LOG(info) << "CLIENT DISCONNECTED"sv;
           session->client_disconnected.store(true, std::memory_order_release);
+          if (session->roaming.enabled) {
+            _roaming.set_stopping(reinterpret_cast<std::uintptr_t>(session));
+          }
           // No more clients to send video data to ^_^
           if (session->state == session::state_e::RUNNING) {
             session::stop(*session);
@@ -2034,6 +2370,7 @@ namespace stream {
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
             pos = server->_sessions->erase(pos);
+            server->roaming_remove(session);
 
             if (session->control.peer) {
               // The control owner alone touches the peer and encryption state.
@@ -2247,6 +2584,9 @@ namespace stream {
           if (it != std::end(peer_to_session)) {
             it->second->raise(peer, std::string {buf[buf_elem].data(), bytes});
           }
+
+          // A session that roamed takes its new destination from its first ping from the new IP.
+          roaming_media_ping(buf_elem ? socket_e::audio : socket_e::video, peer, std::string_view {ping->payload, sizeof(ping->payload)});
         }
       };
     };
@@ -2300,6 +2640,53 @@ namespace stream {
       session.video.fec_allowance_events->raise(static_cast<int>(change->percentage));
     }
     return static_cast<int>(std::min(requested, budget.allowance()));
+  }
+
+  enum class roaming_path_e {
+    ready,  ///< The session's destinations are current.
+    changed,  ///< The session roamed and the destination was just replaced.
+    waiting,  ///< The session roamed and its new destination isn't known yet: send nothing.
+  };
+
+  /**
+   * @brief Called by the video or the audio sender thread, which own that stream's destination, before
+   *        it sends for `session`. Applies the destination the receive thread published after a roam.
+   */
+  static roaming_path_e roaming_sync_path(session_t &session, bool video) {
+    const auto &path = session.roaming.path;
+    if (!path) {
+      return roaming_path_e::ready;
+    }
+    const auto generation = path->generation.load(std::memory_order_acquire);
+    if (generation == 0) {
+      return roaming_path_e::ready;
+    }
+    auto &applied = video ? session.video.roam_applied : session.audio.roam_applied;
+    auto &published = video ? path->video_ready : path->audio_ready;
+    if (published.load(std::memory_order_acquire) != generation) {
+      return roaming_path_e::waiting;
+    }
+    if (applied == generation) {
+      return roaming_path_e::ready;
+    }
+
+    std::lock_guard lg {path->mutex};
+    if (path->generation.load(std::memory_order_relaxed) != generation || published.load(std::memory_order_relaxed) != generation) {
+      return roaming_path_e::waiting;
+    }
+    (video ? session.video.peer : session.audio.peer) = video ? path->video_peer : path->audio_peer;
+    (video ? session.video.roam_local_address : session.audio.roam_local_address) = path->local;
+    applied = generation;
+    return roaming_path_e::changed;
+  }
+
+  /// The host address video is sent from: the control connection's, unless the session roamed.
+  static const boost::asio::ip::address &video_local_address(const session_t &session) {
+    return session.video.roam_applied ? session.video.roam_local_address : session.localAddress;
+  }
+
+  static const boost::asio::ip::address &audio_local_address(const session_t &session) {
+    return session.audio.roam_applied ? session.audio.roam_local_address : session.localAddress;
   }
 
   void videoBroadcastThread(udp::socket &sock) {
@@ -2401,6 +2788,22 @@ namespace stream {
         ).first;
       }
       auto &wire_timeline_state = wire_state_it->second;
+
+      // A session that roamed sends nothing until the client's first ping from its new address has
+      // been seen. The encoder keeps running, and that ping asks for an IDR.
+      const auto roaming_path = roaming_sync_path(*session, true);
+      if (roaming_path == roaming_path_e::waiting) {
+        continue;
+      }
+      if (roaming_path == roaming_path_e::changed) {
+        // The cached link rate and the pacing description belong to the old path.
+        wire_timeline_state.last_route_check = {};
+        wire_timeline_state.logged_pacing.reset();
+        wire_timeline_state.cached_link_bps = 0;
+        wire_timeline_state.cached_interface_id = 0;
+        session->video.qos.reset();
+        session->video.qos = platf::enable_socket_qos(sock.native_handle(), session->video.peer.address(), session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
+      }
       packet_queue_latency_logger.collect_and_log(std::chrono::duration<double, std::milli>(packet_pop_timestamp - packet->packet_enqueue_timestamp).count());
       if (packet->frame_timestamp) {
         if (last_frame_timestamp) {
@@ -2630,7 +3033,7 @@ namespace stream {
             wire_timeline_state.cached_link_alias = "unavailable";
 #ifdef _WIN32
             platf::routed_link_info_t link_info;
-            wire_timeline_state.cached_link_bps = platf::routed_link_bps(session->localAddress, session->video.peer.address(), &link_info);
+            wire_timeline_state.cached_link_bps = platf::routed_link_bps(video_local_address(*session), session->video.peer.address(), &link_info);
             wire_timeline_state.cached_interface_id = link_info.luid;
             if (!link_info.alias.empty()) {
               wire_timeline_state.cached_link_alias = link_info.alias + " (ifType " + std::to_string(link_info.if_type) +
@@ -2638,7 +3041,7 @@ namespace stream {
             }
 #elif defined(__linux__)
             platf::routed_link_info_t link_info;
-            wire_timeline_state.cached_link_bps = platf::routed_link_bps(session->localAddress, session->video.peer.address(), &link_info);
+            wire_timeline_state.cached_link_bps = platf::routed_link_bps(video_local_address(*session), session->video.peer.address(), &link_info);
             wire_timeline_state.cached_interface_id = link_info.if_index;
             if (!link_info.alias.empty()) {
               wire_timeline_state.cached_link_alias = link_info.alias + " (transmit " + std::to_string(link_info.transmit_bps / 1'000'000) + " Mbps)";
@@ -2677,7 +3080,7 @@ namespace stream {
                packet_pop_timestamp - wire_timeline_state.last_pacing_log >= 30s)) {
             wire_timeline_state.logged_pacing = pacing_source;
             wire_timeline_state.last_pacing_log = packet_pop_timestamp;
-            BOOST_LOG(info) << "PyroWave pacing: "sv << session->localAddress << " -> "sv << session->video.peer.address()
+            BOOST_LOG(info) << "PyroWave pacing: "sv << video_local_address(*session) << " -> "sv << session->video.peer.address()
                             << " via "sv << wire_timeline_state.cached_link_alias << ", " << link_interface_kind << ' ' << link_interface_id
                             << ", routed_link_bps "sv << link_bps << (link_bps ? "" : " (fallback: frame/bitrate demand)")
                             << ", "sv << reported_packets_per_ms << " packets/ms at "sv << wire_bytes << " wire bytes ("sv
@@ -2825,7 +3228,7 @@ namespace stream {
             (uintptr_t) sock.native_handle(),
             peer_address,
             session->video.peer.port(),
-            session->localAddress,
+            video_local_address(*session),
           };
           batch_info.send_cancelled = send_cancelled;
 
@@ -2926,7 +3329,7 @@ namespace stream {
                     (uintptr_t) sock.native_handle(),
                     peer_address,
                     session->video.peer.port(),
-                    session->localAddress,
+                    video_local_address(*session),
                   };
                   send_info.send_cancelled = send_cancelled;
                   return platf::send(send_info);
@@ -3182,6 +3585,17 @@ namespace stream {
         continue;
       }
 
+      // A session that roamed gets no audio until its new destination is known; the sequence
+      // doesn't advance meanwhile, so the client sees no gap.
+      const auto roaming_path = roaming_sync_path(*session, false);
+      if (roaming_path == roaming_path_e::waiting) {
+        continue;
+      }
+      if (roaming_path == roaming_path_e::changed) {
+        session->audio.qos.reset();
+        session->audio.qos = platf::enable_socket_qos(sock.native_handle(), session->audio.peer.address(), session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
+      }
+
       auto sequenceNumber = session->audio.sequenceNumber;
       auto timestamp = session->audio.timestamp;
 
@@ -3213,7 +3627,7 @@ namespace stream {
           (uintptr_t) sock.native_handle(),
           peer_address,
           session->audio.peer.port(),
-          session->localAddress,
+          audio_local_address(*session),
         };
         platf::send(send_info);
 
@@ -3240,7 +3654,7 @@ namespace stream {
               (uintptr_t) sock.native_handle(),
               peer_address,
               session->audio.peer.port(),
-              session->localAddress,
+              audio_local_address(*session),
             };
             platf::send(send_info);
             BOOST_LOG(verbose) << "Audio FEC ["sv << (sequenceNumber & ~(RTPA_DATA_SHARDS - 1)) << ' ' << x << "] ::  send..."sv;
@@ -4156,6 +4570,10 @@ namespace stream {
 
       session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
 
+      if (session.roaming.path) {
+        roaming_register(session.roaming.path);
+      }
+
       if (session.config.focusHints) {
         // The detector runs on its own thread and only posts here; the control thread sends.
         // A UI Automation call that blocks can delay a hint but never stall the stream.
@@ -4519,6 +4937,17 @@ namespace stream {
         session->audio.avRiKeyId = util::endian::big(*(std::uint32_t *) launch_session.iv.data());
         session->audio.sequenceNumber = 0;
         session->audio.timestamp = 0;
+      }
+
+      // Client roaming: only for a launch whose DESCRIBE offered it (the option was on then) and a
+      // client that sends a session id, as the roaming key is the launch's rikey.
+      if (launch_session.client_roaming_offered && (config.mlFeatureFlags & ML_FF_SESSION_ID_V1) &&
+          launch_session.gcm_key.size() == session->roaming.rikey.size()) {
+        std::copy(launch_session.gcm_key.begin(), launch_session.gcm_key.end(), session->roaming.rikey.begin());
+        session->roaming.enabled = true;
+        session->roaming.path = std::make_shared<roaming_path_t>();
+        session->roaming.path->ping_payload = launch_session.av_ping_payload;
+        session->roaming.path->idr_events = session->video.idr_events;
       }
 
       session->control.peer = nullptr;

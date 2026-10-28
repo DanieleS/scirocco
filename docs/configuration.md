@@ -2835,6 +2835,38 @@ These settings are host-wide and are not application runtime overrides.
     </tr>
 </table>
 
+### client_roaming
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Experimental. When enabled, the RTSP DESCRIBE answer carries `a=x-rl-roaming:1`. A client that
+            understands it can then move a running stream to a new network address (Wi-Fi to another Wi-Fi,
+            Wi-Fi to mobile data, a NAT rebinding) instead of freezing. The client proves the new address
+            with a challenge/response sealed with a key derived from the session key (AES-128-GCM, 52-byte
+            datagrams on the control port, wire format v1), and the host moves control, video and audio to it
+            only after the proof; probes are rate limited and an unproven address never receives media.
+            The host does nothing until such a datagram arrives, so clients without the feature are unaffected,
+            and the option is read when a stream starts. Roaming only helps if the client can still reach this host from the
+            new network (a port-forwarded or public address); VPN and Tailscale keep the address and need no
+            roaming. A network that maps control and media to different public addresses cannot resume.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            client_roaming = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### video_max_batch_size_kb
 
 <table>

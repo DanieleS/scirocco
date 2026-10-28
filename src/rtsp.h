@@ -71,6 +71,9 @@ namespace rtsp_stream {
 
     std::string av_ping_payload;
     uint32_t control_connect_data;
+    // DESCRIBE offered client roaming to this launch (client_roaming.h): only then does the stream
+    // accept roaming datagrams, so a config change after DESCRIBE can't enable it for this session.
+    bool client_roaming_offered = false;
 
     std::string device_name;
     std::string unique_id;

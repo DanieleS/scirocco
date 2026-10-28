@@ -941,6 +941,8 @@
     "output_name_desc_linux": "Choose a display reported by this Linux host. Leave this blank to let Vibepollo select the primary display automatically.",
     "output_name_desc_unix": "During Vibepollo startup, you should see the list of detected displays. Note: You need to use the id value inside the parenthesis. Below is an example; the actual output can be found in the Troubleshooting tab.",
     "output_name_desc_windows": "Manually specify a display device id to use for capture. If unset, the primary display is captured. Note: If you specified a GPU above, this display must be connected to that GPU. During Vibepollo startup, you should see the list of detected displays. Below is an example; the actual output can be found in the Troubleshooting tab.",
+    "client_roaming": "Client Roaming (Experimental)",
+    "client_roaming_desc": "Let a client that changes network (Wi-Fi to mobile data, another Wi-Fi, a new IP address) keep its stream instead of freezing. The host announces the feature in the stream setup and does nothing until a paired client proves its new address with a key only it holds; clients that don't know it are unaffected. It only helps when the client can still reach this host from the new network (port forwarding, a public address); VPN and Tailscale keep the address and need no roaming. Applies to streams started after the change.",
     "control_peer_timeout": "Control Peer Timeout",
     "control_peer_timeout_desc": "Host ENet control retry timeout in milliseconds (0 to 86399999). 0 keeps the default thresholds of 5 and 30 seconds. To tolerate network drops, also raise Ping Timeout and use a client with a matching retry window. Explicit termination is unaffected.",
     "ping_timeout": "Ping Timeout",
