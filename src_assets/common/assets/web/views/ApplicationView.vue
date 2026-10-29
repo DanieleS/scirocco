@@ -4717,7 +4717,7 @@ onBeforeUnmount(() => {
       </section>
 
       <section
-        v-if="!isNew && !isRemoteSession"
+        v-if="!isNew"
         class="editor-danger"
         aria-labelledby="danger-heading"
       >
