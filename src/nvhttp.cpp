@@ -2790,6 +2790,7 @@ namespace nvhttp {
     };
 
     tls_identity::native_store_t tls_client_identities;
+    remote_session::cached_game_tiles_t cached_running_game_tiles;
 
   bool paired_client_uuid_enabled(const std::string_view uuid, const PERM expected_permissions) {
     std::lock_guard<std::mutex> lock(client_mutex);
@@ -4745,6 +4746,9 @@ namespace nvhttp {
           app_node.put("UUID", entry.uuid);
           app_node.put("IDX", entry.synthetic ? std::to_string(entry.id) : (configured == visible_apps.end() ? "" : (*configured)->idx));
           app_node.put("ID", entry.id);
+          if (entry.synthetic && remote_session::identify(entry.id, entry.uuid) == remote_session::control_e::running_game && current_app) {
+            cached_running_game_tiles.remember(identity.uuid, entry.id, game.app);
+          }
           app_node.put(
             "ArtVersion",
             remote_session::identify(entry.id, entry.uuid) == remote_session::control_e::running_game && current_app ? current_app->art_version :
@@ -4831,6 +4835,28 @@ namespace nvhttp {
 
       auto appid_str = get_arg(args, "appid", "0");
       auto appuuid_str = get_arg(args, "appuuid", "");
+      const auto configured_apps = remote_configured_catalogue(proc::proc.get_apps());
+      const auto cached_game = cached_running_game_tiles.resolve(
+        request_client_identity.uuid, util::from_view(appid_str), appuuid_str, configured_apps
+      );
+      if (cached_game.status == remote_session::cached_game_status_e::unavailable) {
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 404);
+        tree.put("root.<xmlattr>.status_message", "The application for this cached tile is no longer available");
+        return;
+      }
+      const bool cached_running_game = cached_game.app && current_appid > 0 && cached_game.app->id == current_appid;
+      if (cached_game.app && !cached_running_game) {
+        // The temporary row may outlive the stream it represented. Route the
+        // request through normal app admission, including replacement checks and
+        // the app's settings in make_launch_session().
+        appid_str = std::to_string(cached_game.app->id);
+        appuuid_str = cached_game.app->uuid;
+        args.erase("appid");
+        args.emplace("appid", appid_str);
+        args.erase("appuuid");
+        if (!appuuid_str.empty()) args.emplace("appuuid", appuuid_str);
+      }
       // Synthetic controls are host actions, never configured applications.
       // Identify them before resolve_app() so they cannot collide with an
       // apps.json id and accidentally launch a real process.
@@ -4841,6 +4867,7 @@ namespace nvhttp {
         proc::proc.resolve_app(appid_str, appuuid_str) : std::nullopt;
       const bool selected_monitor_profile = selected_app && selected_app->remote_monitor_profile;
       if (selected_monitor_profile) synthetic_control = remote_session::control_e::monitor;
+      if (cached_running_game) synthetic_control = remote_session::control_e::running_game;
       const bool removed_builtin = !selected_monitor_profile && system_remote_app_removed(synthetic_control);
       // A secondary client sees the active game in its projected catalogue
       // while serverinfo is deliberately presented as free. Selecting it is a
