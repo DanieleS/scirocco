@@ -7223,7 +7223,7 @@ launch_session->exact_target_hold.reset();
     auto metrics_busy = std::make_shared<std::atomic_bool>(false);
 
     // Verify certificates after establishing connection
-    https_server.verify = [](req_https_t req, SSL *ssl) {
+    https_server.verify = [](req_https_t req, SSL *ssl, pending_peer_factory_t pending_peer) {
       forget_tls_client_identity(req);
 
       crypto::x509_t x509_verify {
@@ -7275,7 +7275,7 @@ launch_session->exact_target_hold.reset();
         }
 
         const auto result = tls_client_identities.authenticate_certificate(
-          req, x509_verify, cert_chain, client_root.named_devices);
+          req, x509_verify, cert_chain, client_root.named_devices, std::move(pending_peer));
         err_str = result.error;
 
       }
@@ -7320,15 +7320,24 @@ launch_session->exact_target_hold.reset();
     // remain stuck in the kernel even after SIGKILL. Later requests must get
     // a response and must never execute stale mutations after a client timeout.
     auto mutation_admission = std::make_shared<single_flight::admission_t>();
-    auto run_blocking_nvhttp = [&blocking_route_pool, run_on_blocking_pool, mutation_admission](
-                                 auto response,
-                                 const char *operation,
-                                 auto task,
-                                 std::function<void(const dispatch::trace_event_t &)> trace_observer = {}
-                               ) {
-      auto submit = [&](auto admitted) {
+#if defined(__linux__) && !defined(_WIN32)
+    auto linux_handoff = std::make_shared<handoff::admission_t>();
+#endif
+    auto run_blocking_nvhttp = [&blocking_route_pool, run_on_blocking_pool, mutation_admission
+#if defined(__linux__) && !defined(_WIN32)
+                                , linux_handoff
+#endif
+    ](auto response, const char *operation, auto task, std::function<void(const dispatch::trace_event_t &)> trace_observer = {}) {
+      auto submit = [&blocking_route_pool, run_on_blocking_pool](auto admitted) {
         run_on_blocking_pool(blocking_route_pool, std::move(admitted));
       };
+#if defined(__linux__) && !defined(_WIN32)
+      if (trace_observer) {
+        dispatch::run_handoff(*linux_handoff, submit, std::move(response), operation, std::move(task), {}, std::move(trace_observer));
+      } else {
+        dispatch::run_handoff(*linux_handoff, submit, std::move(response), operation, std::move(task));
+      }
+#else
 #ifdef _WIN32
       const bool terminal_fenced = std::string_view(operation) == "launch" ||
                                    std::string_view(operation) == "resume" ||
@@ -7348,7 +7357,18 @@ launch_session->exact_target_hold.reset();
       } else {
         dispatch::run_blocking(*mutation_admission, submit, std::move(response), operation, std::move(task));
       }
+#endif
     };
+
+#if defined(__linux__) && !defined(_WIN32)
+    auto run_linux_start_nvhttp = [&blocking_route_pool, run_on_blocking_pool, linux_handoff](auto response, const char *operation, auto task,
+                                                                                           pending_peer_factory_t peer, std::function<void(const dispatch::trace_event_t &)> trace_observer) {
+      auto submit = [&blocking_route_pool, run_on_blocking_pool](auto admitted) {
+        run_on_blocking_pool(blocking_route_pool, std::move(admitted));
+      };
+      dispatch::run_handoff(*linux_handoff, submit, std::move(response), operation, std::move(task), std::move(peer), std::move(trace_observer));
+    };
+#endif
 
     auto run_discovery_nvhttp = [&discovery_route_pool, run_on_blocking_pool](auto task) {
       run_on_blocking_pool(discovery_route_pool, std::move(task));
@@ -7399,7 +7419,11 @@ launch_session->exact_target_hold.reset();
       });
     };
     https_server.resource["^/appasset$"]["GET"] = appasset;
-    https_server.resource["^/launch$"]["GET"] = [&host_audio, run_blocking_nvhttp](auto resp, auto req) {
+    https_server.resource["^/launch$"]["GET"] = [&host_audio, run_blocking_nvhttp
+#if defined(__linux__) && !defined(_WIN32)
+                                                 , run_linux_start_nvhttp
+#endif
+    ](auto resp, auto req) {
       const auto trace_id = dispatch::next_trace_id();
       BOOST_LOG(info) << "NVHTTP launch trace #" << trace_id << " entered GET /launch route.";
       const auto trace_observer = [trace_id](const dispatch::trace_event_t &event) {
@@ -7408,7 +7432,10 @@ launch_session->exact_target_hold.reset();
                         << dispatch::trace_stage_name(event.stage)
                         << " elapsed_ms=" << elapsed;
       };
-      run_blocking_nvhttp(resp, "launch", [&host_audio, resp, req = std::move(req), trace_id]() mutable {
+#if defined(__linux__) && !defined(_WIN32)
+      auto peer = tls_client_identities.pending_peer(req);
+#endif
+      auto task = [&host_audio, resp, req = std::move(req), trace_id]() mutable {
         const auto request_lock_started = std::chrono::steady_clock::now();
         // Preserve target request ordering before inspecting controls or taking the lifecycle gate.
         std::lock_guard launch_lock {launch_request_mutex};
@@ -7449,10 +7476,18 @@ launch_session->exact_target_hold.reset();
                         << " acquired stream lifecycle gate after " << lifecycle_wait << " ms.";
         const int current_appid = proc::proc.current_app_id();
         launch(host_audio, std::move(resp), std::move(req), current_appid, trace_id);
-      },
-                          trace_observer);
+      };
+#if defined(__linux__) && !defined(_WIN32)
+      run_linux_start_nvhttp(resp, "launch", std::move(task), std::move(peer), trace_observer);
+#else
+      run_blocking_nvhttp(resp, "launch", std::move(task), trace_observer);
+#endif
     };
-    https_server.resource["^/resume$"]["GET"] = [&host_audio, run_blocking_nvhttp](auto resp, auto req) {
+    https_server.resource["^/resume$"]["GET"] = [&host_audio, run_blocking_nvhttp
+#if defined(__linux__) && !defined(_WIN32)
+                                                 , run_linux_start_nvhttp
+#endif
+    ](auto resp, auto req) {
       const auto trace_id = dispatch::next_trace_id();
       BOOST_LOG(info) << "NVHTTP Resume trace #" << trace_id << " entered GET /resume route.";
       const auto trace_observer = [trace_id](const dispatch::trace_event_t &event) {
@@ -7461,7 +7496,10 @@ launch_session->exact_target_hold.reset();
                         << dispatch::trace_stage_name(event.stage)
                         << " elapsed_ms=" << elapsed;
       };
-      run_blocking_nvhttp(resp, "resume", [&host_audio, resp, req = std::move(req), trace_id]() mutable {
+#if defined(__linux__) && !defined(_WIN32)
+      auto peer = tls_client_identities.pending_peer(req);
+#endif
+      auto task = [&host_audio, resp, req = std::move(req), trace_id]() mutable {
         const auto request_lock_started = std::chrono::steady_clock::now();
         // Keep resume ordered with teardown and normal app transitions.
         std::lock_guard launch_lock {launch_request_mutex};
@@ -7482,8 +7520,12 @@ launch_session->exact_target_hold.reset();
                         << " acquired stream lifecycle gate after " << lifecycle_wait << " ms.";
         const int current_appid = proc::proc.current_app_id();
         resume(host_audio, std::move(resp), std::move(req), current_appid, true, false, trace_id);
-      },
-                          trace_observer);
+      };
+#if defined(__linux__) && !defined(_WIN32)
+      run_linux_start_nvhttp(resp, "resume", std::move(task), std::move(peer), trace_observer);
+#else
+      run_blocking_nvhttp(resp, "resume", std::move(task), trace_observer);
+#endif
     };
     https_server.resource["^/cancel$"]["GET"] = [run_blocking_nvhttp](auto resp, auto req) {
       run_blocking_nvhttp(resp, "cancel", [resp, req = std::move(req)]() mutable {
@@ -7575,6 +7617,9 @@ launch_session->exact_target_hold.reset();
     // Wait for any event
     shutdown_event->view();
 
+#if defined(__linux__) && !defined(_WIN32)
+    linux_handoff->stop();
+#endif
 #ifdef __linux__
     if (const char *machine_host = std::getenv("VIBEPOLLO_MACHINE_HOST"); machine_host && machine_host[0] == '1' && machine_host[1] == '\0') {
       // Publish the handoff fence before any session destructor can recompose,

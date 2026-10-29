@@ -413,10 +413,10 @@ namespace {
     server.config.timeout_request = 3;
     std::atomic_uint handshakes {0};
     std::vector<request_t> route_requests;
-    server.verify = [&](request_t request, SSL *ssl) {
+    server.verify = [&](request_t request, SSL *ssl, pending_peer_factory_t pending_peer) {
       ++handshakes;
       std::lock_guard lock(client_mutex);
-      return store.authenticate(request, ssl, chain, clients).identity.has_value();
+      return store.authenticate(request, ssl, chain, clients, std::move(pending_peer)).identity.has_value();
     };
     server.on_verify_failed = [](auto response, auto) {
       response->close_connection_after_response = true;
@@ -517,6 +517,25 @@ namespace {
     tls_identity::native_store_t native_store;
     std::vector<crypto::p_named_cert_t> records;
   };
+
+  TEST_F(NativeTlsClientIdentity, PendingPeerFactoryRemainsBoundToNativeTransportAuthority) {
+    auto transport = factory.connect();
+    const auto request = factory.request(transport);
+    int factories = 0;
+    auto certificate = crypto::x509(first_credentials().x509);
+    {
+      std::lock_guard lock(client_mutex);
+      ASSERT_TRUE(native_store.authenticate_certificate(request, certificate, chain, records,
+        [&factories]() -> std::shared_ptr<pending_peer_t> { ++factories; return {}; }).identity);
+    }
+    const auto peer = native_store.pending_peer(request);
+    ASSERT_TRUE(peer);
+    peer();
+    EXPECT_EQ(factories, 1);
+    native_store.revoke(first_uuid);
+    EXPECT_FALSE(native_store.pending_peer(request));
+    EXPECT_FALSE(native_resolve(request));
+  }
 
   TEST_F(NativeTlsClientIdentity, NativeConversionRecognizesOnlyCurrentPermissionBits) {
     for (const auto permission : {crypto::PERM::_no, crypto::PERM::_reserved, static_cast<crypto::PERM>(0x80000000u)}) {
