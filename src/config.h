@@ -173,6 +173,8 @@ namespace config {
     bool remote_monitor_terminate_on_first_request;  ///< Let extra clients terminate the active game with one Terminate request.
     bool remote_monitor_confirm_app_replacement;  ///< Require confirmation before an ungated launch replaces the active game.
 
+    bool benchmark_app;  ///< Offer the hidden "Benchmark" app clients compare their streaming settings on.
+
     struct dd_t {
       struct workarounds_t {
         bool dummy_plug_hdr10;  ///< Force 30 Hz and HDR for physical dummy plugs (requires VSYNC override).

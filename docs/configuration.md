@@ -1688,6 +1688,22 @@ resumable to that paired client, allowing Moonlight to show its native close-app
 warning on the next attempt. The confirmation window is 60 seconds. Disable
 this option to replace the running app immediately. The default is `true`.
 
+### benchmark_app
+
+Lets paired clients benchmark their streaming settings against this host. A
+hidden built-in `Benchmark` app runs `tools\scirocco-benchmark-scene.exe`, an
+animated scene that is identical on every run, on a virtual display of the
+stream's size and rate (when the virtual display driver is available). A client
+streams it once per combination of codec, bitrate and frame pacing and scores
+each run. The app never appears in the app list unless it is running, so that a
+benchmark cut short can still be resumed or quit; `serverinfo` announces it to
+paired clients allowed to launch apps as `BenchmarkAppId` and `BenchmarkAppUuid`.
+Windows only. The default is `true`.
+
+@code{}
+benchmark_app = enabled
+@endcode
+
 ### dd_configuration_option
 
 <table>

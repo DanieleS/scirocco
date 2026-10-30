@@ -398,6 +398,18 @@ sunshine_add_test_target(
 )
 
 sunshine_add_test_target(
+    NAME test_fast_benchmark_app
+    CATEGORY fast
+    TEST_SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/tests_main.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/unit/test_benchmark_app.cpp"
+    PRODUCT_SOURCES
+    DEFINITIONS
+    LINK_LIBRARIES GTest::gtest
+    DEPENDENCIES
+)
+
+sunshine_add_test_target(
     NAME test_fast_thread_safe
     CATEGORY fast
     TEST_SOURCES
