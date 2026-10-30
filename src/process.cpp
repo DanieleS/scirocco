@@ -965,6 +965,7 @@ namespace proc {
   std::string input_only_app_id_str;
   int terminate_app_id = -1;
   std::string terminate_app_id_str;
+  int benchmark_app_id = -1;
 
 #ifdef _WIN32
   std::atomic<VDISPLAY::DRIVER_STATUS> vDisplayDriverStatus {VDISPLAY::DRIVER_STATUS::UNKNOWN};
@@ -1834,6 +1835,11 @@ namespace proc {
     _env["APOLLO_CLIENT_GCMAP"] = std::to_string(launch_session->gcmap);
     _env["APOLLO_CLIENT_HOST_AUDIO"] = launch_session->host_audio ? "true" : "false";
     _env["APOLLO_CLIENT_ENABLE_SOPS"] = launch_session->enable_sops ? "true" : "false";
+    // The display capture reads (several joined by '+' for a multi-display layout), for an app
+    // that must put itself on it: the benchmark scene does
+    if (!this->display_name.empty()) {
+      _env["SCIROCCO_CAPTURE_DISPLAY"] = this->display_name;
+    }
 
 #ifdef __linux__
     const bool mangohud_uses_lossless_limit =
@@ -4894,6 +4900,42 @@ namespace proc {
       ctx.idx = std::to_string(i);
 
       assign_unique_generated_app_id(ctx, i++, ids, apps);
+
+      apps.emplace_back(std::move(ctx));
+    }
+
+    // Benchmark entry: the animated scene a client streams while it compares its settings.
+    // Hidden from /applist unless running, advertised in serverinfo instead.
+    benchmark_app_id = -1;
+    if (config::video.benchmark_app) {
+      std::wstring exe_path(MAX_PATH, L'\0');
+      exe_path.resize(GetModuleFileNameW(nullptr, exe_path.data(), MAX_PATH));
+      const auto scene = std::filesystem::path(exe_path).parent_path() / L"tools" / L"scirocco-benchmark-scene.exe";
+
+      proc::ctx_t ctx {};
+      ctx.idx = std::to_string(i);
+      ctx.uuid = BENCHMARK_APP_UUID;
+      ctx.name = "Benchmark";
+      ctx.cmd = "\"" + platf::to_utf8(scene.wstring()) + "\"";
+      ctx.working_dir = platf::to_utf8(scene.parent_path().wstring());
+      ctx.image_path = parse_env_val(this_env, "virtual_desktop.png");
+      // The display the size and rate of the stream, like a game would get
+      ctx.virtual_display = vDisplayDriverStatus.load(std::memory_order_acquire) == VDISPLAY::DRIVER_STATUS::OK;
+      ctx.virtual_display_primary = true;
+      ctx.scale_factor = 100;
+      ctx.use_app_identity = false;
+      ctx.per_client_app_identity = false;
+      ctx.allow_client_commands = false;
+      ctx.terminate_on_pause = false;
+
+      ctx.elevated = false;
+      ctx.auto_detach = false;
+      ctx.wait_all = true;
+      ctx.exit_timeout = 5s;
+
+      assign_unique_generated_app_id(ctx, i++, ids, apps);
+
+      benchmark_app_id = util::from_view(ctx.id);
 
       apps.emplace_back(std::move(ctx));
     }

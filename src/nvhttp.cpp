@@ -46,6 +46,7 @@
 // local includes
 #include "app_display_policy.h"
 #include "audio.h"
+#include "benchmark_app_policy.h"
 #include "config.h"
 #include "config_playnite.h"
 #include "host_stream_control.h"
@@ -4264,6 +4265,13 @@ namespace nvhttp {
         }
 
         tree.put("root.Permission", std::to_string((uint32_t) perm));
+
+        // The hidden app a client benchmarks its settings on. Absent when the host does not offer
+        // it, or the client could not launch it anyway.
+        if (config::video.benchmark_app && proc::benchmark_app_id > 0 && !!(perm & PERM::launch)) {
+          tree.put("root.BenchmarkAppId", proc::benchmark_app_id);
+          tree.put("root.BenchmarkAppUuid", BENCHMARK_APP_UUID);
+        }
       } else {
         tree.put("root.mac", "00:00:00:00:00:00");
         tree.put("root.Permission", "0");
@@ -4611,6 +4619,11 @@ namespace nvhttp {
             include = show_terminate_entry;
           }
 
+          // The Benchmark app is launched by the UUID serverinfo gives, and shown only while it runs
+          if (!benchmark_app_listed(appid, current_appid, proc::benchmark_app_id)) {
+            include = false;
+          }
+
           if (!include) {
             continue;
           }
@@ -4624,6 +4637,7 @@ namespace nvhttp {
           // Preserve visibility policy while reserving hidden IDs and aliases.
           configured_apps[i].catalogue_visible =
             appid != proc::input_only_app_id && appid != proc::terminate_app_id &&
+            benchmark_app_listed(appid, current_appid, proc::benchmark_app_id) &&
             std::find(visible_apps.begin(), visible_apps.end(), &app_list[i]) != visible_apps.end();
         }
 

@@ -287,4 +287,6 @@ namespace proc {
   extern std::string input_only_app_id_str;
   extern int terminate_app_id;
   extern std::string terminate_app_id_str;
+  /// The built-in "Benchmark" app (`config::video.benchmark_app`), -1 when not offered
+  extern int benchmark_app_id;
 }  // namespace proc

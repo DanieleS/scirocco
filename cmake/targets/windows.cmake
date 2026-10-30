@@ -158,6 +158,7 @@ foreach(_packaged_target IN ITEMS
         sunshinesvc
         playnite-launcher
         sunshine_wgc_capture
+        scirocco-benchmark-scene
         sunshine_end_stream_hotkey
         sunshine_display_helper)
     if(TARGET "${_packaged_target}")

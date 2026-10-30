@@ -698,7 +698,14 @@ export const settingsCategories: SettingsCategory[] = [
       },
       {
         id: 'display_remote_monitor',
-        fields: remoteMonitorFields(),
+        fields: [
+          ...remoteMonitorFields(),
+          boolean('benchmark_app', {
+            labelKey: 'ui.settings.fields.benchmark_app.label',
+            descriptionKey: 'ui.settings.fields.benchmark_app.description',
+            platform: 'windows',
+          }),
+        ],
       },
       {
         id: 'display_target',
@@ -1200,6 +1207,7 @@ export const settingsDefaults: Record<string, unknown> = {
   remote_monitor_disconnect_on_client_disconnect: false,
   remote_monitor_terminate_on_first_request: false,
   remote_monitor_confirm_app_replacement: true,
+  benchmark_app: true,
   dd_virtual_display_scale: 0,
   frame_limiter_enable: false,
   frame_limiter_provider: 'auto',
