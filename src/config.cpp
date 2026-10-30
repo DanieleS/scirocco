@@ -1053,6 +1053,7 @@ namespace config {
 
     true,  // keyboard enabled
     true,  // mouse enabled
+    "auto",  // Windows keyboard and mouse input backend
     true,  // controller enabled
     true,  // always send scancodes
     true,  // high resolution scrolling
@@ -2272,6 +2273,7 @@ namespace config {
 
     bool_f(vars, "mouse", input.mouse);
     bool_f(vars, "keyboard", input.keyboard);
+    string_restricted_f(vars, "keyboard_mouse_backend", input.keyboard_mouse_backend, {"auto"sv, "sendinput"sv, "vhf"sv});
     bool_f(vars, "controller", input.controller);
 
     bool_f(vars, "always_send_scancodes", input.always_send_scancodes);
