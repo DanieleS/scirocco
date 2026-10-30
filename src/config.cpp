@@ -1007,6 +1007,7 @@ namespace config {
     false,  // pacing_batch_demand_limit (experimental per-call demand-based sizing; default off)
     20,  // pyrowave_critical_fec_percentage
     false,  // client_roaming (experimental; default off)
+    false,  // experimental_packed_444 (experimental; default off)
 
     ENCRYPTION_MODE_NEVER,  // lan_encryption_mode
     ENCRYPTION_MODE_OPPORTUNISTIC,  // wan_encryption_mode
@@ -2302,6 +2303,7 @@ namespace config {
     int_between_f(vars, "video_max_batch_size_kb", stream.video_max_batch_size_kb, {0, 64});
     bool_f(vars, "pacing_batch_demand_limit", stream.pacing_batch_demand_limit);
     bool_f(vars, "client_roaming", stream.client_roaming);
+    bool_f(vars, "experimental_packed_444", stream.experimental_packed_444);
     if (stream.video_max_batch_size_kb == 0) {
       stream.video_max_batch_size_kb = 64;
     } else if (stream.video_max_batch_size_kb != 16 && stream.video_max_batch_size_kb != 32 && stream.video_max_batch_size_kb != 64) {

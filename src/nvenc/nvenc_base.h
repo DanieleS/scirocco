@@ -211,6 +211,10 @@ namespace nvenc {
 
     bool hdr_metadata_valid = false;
     SS_HDR_METADATA hdr_metadata {};
+
+    // Packed 4:4:4 stream: the bitstream is signalled as plain SDR, so no HDR SEI is written
+    // even when HDR metadata is known (it only travels on the control stream).
+    bool packed_chroma = false;
   };
 
 }  // namespace nvenc

@@ -513,6 +513,8 @@
     "av1_mode_2": "Vibepollo will advertise support for AV1 Main 8-bit profile",
     "av1_mode_3": "Vibepollo will advertise support for AV1 Main 8-bit and 10-bit (HDR) profiles",
     "av1_mode_desc": "Allows the client to request AV1 Main 8-bit or 10-bit video streams. AV1 is more CPU-intensive to encode, so enabling this may reduce performance when using software encoding.",
+    "experimental_packed_444": "Experimental Full Chroma (Packed 4:4:4)",
+    "experimental_packed_444_desc": "Offer full chroma resolution (sharper text and UI edges) to clients that can rebuild it: the 4:4:4 picture is packed into a 4:2:0 HEVC or AV1 frame and rebuilt on the client GPU, so it works with decoders that only handle 4:2:0. The coded frame has twice the pixels, which doubles the encoding and decoding work. Only the NVIDIA NVENC encoder offers it; RTX HDR is not applied to such streams. Clients that don't know it are unaffected. Applies to streams started after the change.",
     "pyrowave": "PyroWave Support",
     "pyrowave_desc": "Allows PyroWave-capable clients to request PyroWave, an intra-only GPU wavelet codec. Each frame is coded on its own in well under a millisecond and a lost frame never needs a keyframe, but a clean picture needs hundreds of Mbps, so use it on wired LANs only. Critical packets use the PyroWave Critical FEC Percentage setting. Requires a compatible Vulkan GPU; Windows uses Direct3D 11 interop, while Linux supports RGB DMA-BUF and BGRA system-memory capture.",
     "app_prefer_10bit_sdr_inherit": "Use device preference",

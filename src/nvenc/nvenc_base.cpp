@@ -28,6 +28,7 @@
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/utility.h"
+#include "src/video_packed444.h"
 
 namespace {
 
@@ -175,8 +176,16 @@ namespace nvenc {
       destroy_encoder();
     });
 
-    encoder_params.width = client_config.width;
-    encoder_params.height = client_config.height;
+    // A packed 4:4:4 stream is coded at the packed size, the logical size stays in client_config.
+    packed_chroma = client_config.chroma_packing != 0;
+    if (packed_chroma) {
+      const auto coded = video::packed444::coded_size(client_config.width, client_config.height);
+      encoder_params.width = coded.width;
+      encoder_params.height = coded.height;
+    } else {
+      encoder_params.width = client_config.width;
+      encoder_params.height = client_config.height;
+    }
     encoder_params.buffer_format = buffer_format;
     encoder_params.video_format = client_config.videoFormat;
     encoder_params.rfi = true;
@@ -317,6 +326,18 @@ namespace nvenc {
           continue;
         }
         return false;
+      }
+
+      if (packed_chroma) {
+        // The coded size is twice the logical one: check the real minimums as well.
+        auto supported_width_min = get_encoder_cap(NV_ENC_CAPS_WIDTH_MIN);
+        auto supported_height_min = get_encoder_cap(NV_ENC_CAPS_HEIGHT_MIN);
+        if ((supported_width_min && encoder_params.width < (uint32_t) *supported_width_min) ||
+            (supported_height_min && encoder_params.height < (uint32_t) *supported_height_min)) {
+          BOOST_LOG(error) << "NvEnc: gpu min encode resolution " << supported_width_min.value_or(0) << "x" << supported_height_min.value_or(0)
+                           << ", packed 4:4:4 coded size " << encoder_params.width << "x" << encoder_params.height;
+          return false;
+        }
       }
 
       if (encoder_params.width > *supported_width || encoder_params.height > *supported_height) {
@@ -1050,7 +1071,7 @@ namespace nvenc {
 #if NVENCAPI_MAJOR_VERSION >= 13
     CONTENT_LIGHT_LEVEL content_light_level {};
     MASTERING_DISPLAY_INFO mastering_display {};
-    if (hdr_metadata_valid && api::supports_hdr10_metadata(selected_api_version)) {
+    if (hdr_metadata_valid && !packed_chroma && api::supports_hdr10_metadata(selected_api_version)) {
       content_light_level.maxContentLightLevel = hdr_metadata.maxContentLightLevel;
       content_light_level.maxPicAverageLightLevel = hdr_metadata.maxFrameAverageLightLevel;
 

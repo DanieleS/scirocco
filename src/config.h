@@ -294,6 +294,7 @@ namespace config {
     bool pacing_batch_demand_limit;  ///< Experimental per-call demand-based video batch sizing (default off).
     int pyrowave_critical_fec_percentage;  ///< Parity on the PyroWave shards holding the coarsest wavelet level (at least 2 shards); 0 = none.
     bool client_roaming;  ///< Experimental: offer client roaming in DESCRIBE and move a session to a proven new client address (default off).
+    bool experimental_packed_444;  ///< Experimental: offer packed 4:4:4 in a 4:2:0 frame (native NVENC D3D11 only) in DESCRIBE (default off).
 
     // Video encryption settings for LAN and WAN streams
     int lan_encryption_mode;

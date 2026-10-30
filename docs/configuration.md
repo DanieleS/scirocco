@@ -3391,6 +3391,39 @@ These settings are host-wide and are not application runtime overrides.
     </tr>
 </table>
 
+### experimental_packed_444
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Experimental, Windows with the native NVIDIA NVENC encoder only. When enabled, the RTSP DESCRIBE
+            answer carries `a=x-rl-video.packed444Version:1` and `a=x-rl-video.packed444Modes:<mask>` (bit 0
+            HEVC 8-bit, bit 1 HEVC 10-bit, bit 2 AV1 8-bit, bit 3 AV1 10-bit; only the modes the encoder
+            supports). A client that can rebuild full chroma resolution answers with
+            `a=x-rl-video[0].chromaPacking:1`, and the host then packs the 4:4:4 picture into one ordinary
+            4:2:0 HEVC or AV1 frame of `((W + 63) & ~63) x 2 * ((H + 7) & ~7)` pixels (sharper text and UI
+            edges on decoders that only handle 4:2:0, at twice the encoded and decoded pixels). The
+            bitstream is signalled as plain full-range BT.709 SDR; whether the sample codes are HDR10 or SDR
+            travels in the HDR mode control message. RTX HDR is not applied to packed streams, and the bit
+            depth and size never change during the stream. Clients that don't send `chromaPacking` are
+            unaffected. The option is read when a stream starts.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            experimental_packed_444 = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### capture
 
 <table>

@@ -89,6 +89,13 @@ namespace platf::dxgi {
     return buf_t {buf_p};
   }
 
+  // Constant buffer b2 of the packed 4:4:4 pixel shaders (convert_packed444_ps_base.hlsl).
+  struct alignas(16) packed444_params_t {
+    float size[4];  ///< logical width, logical height, padded width, padded height
+    float box[4];  ///< letterbox offset x, offset y, width, height in logical pixels
+    int32_t rotation[4];  ///< x: 90-degree steps of the captured texture
+  };
+
   struct alignas(16) sdr_to_pq_params_t {
     float sdr_white_nits;
     float padding[3];
@@ -162,6 +169,14 @@ namespace platf::dxgi {
   blob_t convert_yuv444_packed_y410_ps_perceptual_quantizer_hlsl;
   blob_t convert_yuv444_packed_y410_ps_sdr_to_pq_hlsl;
   blob_t convert_yuv444_planar_vs_hlsl;
+  blob_t convert_packed444_y_ps_hlsl;
+  blob_t convert_packed444_y_ps_linear_hlsl;
+  blob_t convert_packed444_y_ps_perceptual_quantizer_hlsl;
+  blob_t convert_packed444_y_ps_sdr_to_pq_hlsl;
+  blob_t convert_packed444_uv_ps_hlsl;
+  blob_t convert_packed444_uv_ps_linear_hlsl;
+  blob_t convert_packed444_uv_ps_perceptual_quantizer_hlsl;
+  blob_t convert_packed444_uv_ps_sdr_to_pq_hlsl;
   blob_t cursor_ps_hlsl;
   blob_t cursor_ps_normalize_white_hlsl;
   blob_t cursor_vs_hlsl;
@@ -1189,9 +1204,20 @@ namespace platf::dxgi {
       return 0;
     }
 
-    int init_output(ID3D11Texture2D *frame_texture, int width, int height, const ::video::sunshine_colorspace_t &colorspace) {
+    /**
+     * @param width,height Logical output size. With `packed` the encoder texture holds the packed
+     *        4:4:4 picture of that logical size, `video::packed444::coded_size(width, height)`.
+     * @param packed Render the packed 4:4:4 layout (video_packed444.h) instead of 4:2:0; NV12/P010 only.
+     */
+    int init_output(ID3D11Texture2D *frame_texture, int width, int height, const ::video::sunshine_colorspace_t &colorspace, bool packed = false) {
 
       HRESULT status = S_OK;
+
+      packed444 = packed;
+      if (packed444 && format != DXGI_FORMAT_NV12 && format != DXGI_FORMAT_P010) {
+        BOOST_LOG(error) << "Packed 4:4:4 needs an NV12 or P010 output surface";
+        return -1;
+      }
 
 #define create_vertex_shader_helper(x, y) \
   if (!x) { \
@@ -1222,7 +1248,25 @@ namespace platf::dxgi {
       const bool downscaling = display_width > width || display_height > height;
       const bool target_hdr = ::video::colorspace_is_hdr(colorspace);
 
-      switch (format) {
+      if (packed444) {
+        // Both planes are drawn by the same full-screen triangle over the whole plane; the
+        // packed shaders do the letterbox, the rotation and the sample placement themselves.
+        create_vertex_shader_helper(convert_yuv420_planar_y_vs_hlsl, convert_Y_or_YUV_vs);
+        create_vertex_shader_helper(convert_yuv420_planar_y_vs_hlsl, convert_UV_vs);
+        create_pixel_shader_helper(convert_packed444_y_ps_hlsl, convert_Y_or_YUV_ps);
+        create_pixel_shader_helper(convert_packed444_uv_ps_hlsl, convert_UV_ps);
+        if (format == DXGI_FORMAT_P010 && target_hdr) {
+          create_pixel_shader_helper(convert_packed444_y_ps_perceptual_quantizer_hlsl, convert_Y_or_YUV_fp16_ps);
+          create_pixel_shader_helper(convert_packed444_y_ps_sdr_to_pq_hlsl, convert_Y_or_YUV_sdr_to_pq_ps);
+          create_pixel_shader_helper(convert_packed444_uv_ps_perceptual_quantizer_hlsl, convert_UV_fp16_ps);
+          create_pixel_shader_helper(convert_packed444_uv_ps_sdr_to_pq_hlsl, convert_UV_sdr_to_pq_ps);
+        } else {
+          create_pixel_shader_helper(convert_packed444_y_ps_linear_hlsl, convert_Y_or_YUV_fp16_ps);
+          create_pixel_shader_helper(convert_packed444_uv_ps_linear_hlsl, convert_UV_fp16_ps);
+          convert_Y_or_YUV_sdr_to_pq_ps.reset();
+          convert_UV_sdr_to_pq_ps.reset();
+        }
+      } else switch (format) {
         case DXGI_FORMAT_NV12:
           // Semi-planar 8-bit YUV 4:2:0
           create_vertex_shader_helper(convert_yuv420_planar_y_vs_hlsl, convert_Y_or_YUV_vs);
@@ -1363,6 +1407,32 @@ namespace platf::dxgi {
       out_UV_viewport = {offsetX / 2, offsetY / 2, out_width_f / 2, out_height_f / 2, 0.0f, 1.0f};
       out_UV_viewport_for_clear = {0, 0, (float) out_width / 2, (float) out_height / 2, 0.0f, 1.0f};
 
+      if (packed444) {
+        // The packed shaders cover the whole coded plane and place the letterboxed picture
+        // themselves, so every sample (padding and bars included) gets its code value.
+        const auto coded = ::video::packed444::coded_size(width, height);
+        const D3D11_VIEWPORT y_plane {0, 0, (float) coded.width, (float) coded.height, 0.0f, 1.0f};
+        const D3D11_VIEWPORT uv_plane {0, 0, (float) coded.width / 2, (float) coded.height / 2, 0.0f, 1.0f};
+        out_Y_or_YUV_viewports.fill(y_plane);
+        out_Y_or_YUV_viewports_for_clear.fill(y_plane);
+        out_UV_viewport = uv_plane;
+        out_UV_viewport_for_clear = uv_plane;
+
+        const int32_t rotation_steps = display_rotation == DXGI_MODE_ROTATION_UNSPECIFIED ? 0 : -(int32_t) (display_rotation - 1);
+        const packed444_params_t params {
+          {(float) width, (float) height, (float) coded.width, (float) (coded.height / 2)},
+          {offsetX, offsetY, out_width_f, out_height_f},
+          {rotation_steps, 0, 0, 0},
+        };
+        packed444_params = make_buffer(device.get(), params);
+        if (!packed444_params) {
+          BOOST_LOG(error) << "Failed to create packed 4:4:4 parameter constant buffer";
+          return -1;
+        }
+        auto *packed444_params_p = packed444_params.get();
+        device_ctx->PSSetConstantBuffers(2, 1, &packed444_params_p);
+      }
+
       float subsample_offset_in[16 / sizeof(float)] {1.0f / (float) out_width_f, 1.0f / (float) out_height_f};  // aligned to 16-byte
       subsample_offset = make_buffer(device.get(), subsample_offset_in);
 
@@ -1415,6 +1485,12 @@ namespace platf::dxgi {
         default:
           BOOST_LOG(error) << "Unable to create render target views because of the unrecognized surface format";
           return -1;
+      }
+
+      if (packed444) {
+        // A flat clear would put 0 in the packed chroma samples of the luma plane. The first
+        // convert() draws black through the packed shaders instead.
+        output_rtv_simple_clear = false;
       }
 
       if (dynamic_output_textures) {
@@ -1951,6 +2027,9 @@ namespace platf::dxgi {
     buf_t sdr_to_pq_params;
     float sdr_to_pq_white_nits = 100.0f;
 
+    buf_t packed444_params;
+    bool packed444 = false;  ///< Packed 4:4:4 in a 4:2:0 frame (video_packed444.h), NV12/P010 only.
+
     blend_t blend_disable;
     sampler_state_t sampler_linear;
 
@@ -2165,7 +2244,18 @@ namespace platf::dxgi {
         return false;
       }
 
-      auto nvenc_colorspace = nvenc::nvenc_colorspace_from_sunshine_colorspace(colorspace);
+      const bool packed = client_config.chroma_packing != 0;
+      if (packed && buffer_format != NV_ENC_BUFFER_FORMAT_NV12 && buffer_format != NV_ENC_BUFFER_FORMAT_YUV420_10BIT) {
+        BOOST_LOG(error) << "Packed 4:4:4 needs a 4:2:0 encoder input format";
+        return false;
+      }
+
+      // A packed stream is signalled as plain full-range BT.709 SDR whatever its content (the
+      // client learns the content colour policy from the HDR-mode control message), so the
+      // bitstream colourspace and the one the shaders convert to are not the same here.
+      auto nvenc_colorspace = nvenc::nvenc_colorspace_from_sunshine_colorspace(
+        packed ? ::video::sunshine_colorspace_t {::video::colorspace_e::rec709, true, colorspace.bit_depth} : colorspace
+      );
       if (!nvenc_d3d->create_encoder(
             config::video.nv,
             client_config,
@@ -2177,7 +2267,7 @@ namespace platf::dxgi {
       }
 
       base.apply_colorspace(colorspace, client_config.rtx_hdr_active);
-      return base.init_output(nvenc_d3d->get_input_texture(), client_config.width, client_config.height, colorspace) == 0;
+      return base.init_output(nvenc_d3d->get_input_texture(), client_config.width, client_config.height, colorspace, packed) == 0;
     }
 
     int convert(platf::img_t &img_base) override {
@@ -3286,6 +3376,14 @@ namespace platf::dxgi {
     compile_pixel_shader_helper(convert_yuv444_packed_y410_ps_perceptual_quantizer);
     compile_pixel_shader_helper(convert_yuv444_packed_y410_ps_sdr_to_pq);
     compile_vertex_shader_helper(convert_yuv444_planar_vs);
+    compile_pixel_shader_helper(convert_packed444_y_ps);
+    compile_pixel_shader_helper(convert_packed444_y_ps_linear);
+    compile_pixel_shader_helper(convert_packed444_y_ps_perceptual_quantizer);
+    compile_pixel_shader_helper(convert_packed444_y_ps_sdr_to_pq);
+    compile_pixel_shader_helper(convert_packed444_uv_ps);
+    compile_pixel_shader_helper(convert_packed444_uv_ps_linear);
+    compile_pixel_shader_helper(convert_packed444_uv_ps_perceptual_quantizer);
+    compile_pixel_shader_helper(convert_packed444_uv_ps_sdr_to_pq);
 #ifdef SUNSHINE_ENABLE_NV_TRUEHDR
     compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_truehdr_peak);
     compile_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_truehdr_peak);
