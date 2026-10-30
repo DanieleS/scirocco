@@ -186,7 +186,9 @@ namespace rtsp_stream {
     // desktop or any non-matching app, so we can turn RTX HDR off without changing
     // WGC capture format or reinitializing the encoder.
     // PyroWave runs TrueHDR on its own conversion device on both platforms.
-    config.rtx_hdr_active = config::runtime_config_override_enabled("rtx_hdr") &&
+    // A packed 4:4:4 stream never synthesizes HDR (provisional: HDR only from a real HDR source).
+    config.rtx_hdr_active = config.chroma_packing == 0 &&
+                            config::runtime_config_override_enabled("rtx_hdr") &&
                             config::video.rtx_hdr.enabled &&
 #if !defined(SUNSHINE_ENABLE_NV_TRUEHDR)
                             config.videoFormat != pyrowave::protocol::BITSTREAM_FORMAT &&
@@ -2113,6 +2115,10 @@ namespace rtsp_stream {
       ss << pyrowave::protocol::DESCRIBE_BITSTREAM_ATTRIBUTE << pyrowave::protocol::BITSTREAM_ID << std::endl;
     }
 
+    // Packed 4:4:4 (video_packed444.h): both lines or neither, only with the option on and
+    // a mode the native NVENC path can serve. Clients that don't know them ignore the lines.
+    ss << video::packed444::describe_lines(config::stream.experimental_packed_444, video::packed444_offered_modes());
+
     if (!session->surround_params.empty()) {
       // If we have our own surround parameters, advertise them twice first
       ss << "a=fmtp:97 surround-params="sv << session->surround_params << std::endl;
@@ -2506,13 +2512,55 @@ namespace rtsp_stream {
                       << ", packetSize="sv << config.packetsize;
     }
 
+    // Packed 4:4:4 (video_packed444.h): absent or 0 means off and changes nothing below.
+    {
+      std::optional<std::string_view> requested_packing;
+      if (const auto it = args.find(video::packed444::announce_attribute); it != args.end()) {
+        requested_packing = it->second;
+      }
+      const auto packing = video::packed444::parse_chroma_packing(requested_packing);
+      if (!packing) {
+        BOOST_LOG(warning) << "Rejecting invalid client chromaPacking ["sv << *requested_packing << "]"sv;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, "chromaPacking must be 0 or 1"sv);
+        return false;
+      }
+      if (*packing == 1) {
+        const video::packed444::announce_t announce {
+          config.monitor.videoFormat,
+          config.monitor.dynamicRange,
+          config.monitor.chromaSamplingType,
+          config.monitor.width,
+          config.monitor.height,
+        };
+        if (const char *reason = video::packed444::validate_announce(announce, config::stream.experimental_packed_444, video::packed444_offered_modes())) {
+          BOOST_LOG(warning) << "Rejecting packed 4:4:4 request: "sv << reason;
+          respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, std::string_view {reason});
+          return false;
+        }
+        config.monitor.chroma_packing = 1;
+        const auto coded = video::packed444::coded_size(config.monitor.width, config.monitor.height);
+        BOOST_LOG(info) << "Client requested packed 4:4:4: "sv << config.monitor.width << 'x' << config.monitor.height
+                        << " coded as "sv << coded.width << 'x' << coded.height
+                        << (config.monitor.dynamicRange == 1 ? ", 10-bit"sv : ", 8-bit"sv);
+      }
+    }
+    const bool packed_444 = config.monitor.chroma_packing != 0;
+
     const bool prefer_10bit_sdr = effective_10bit_sdr_requested(*session);
     const bool hevc_main10 = config.monitor.videoFormat == 1 && video::active_hevc_mode >= 3;
     const bool av1_main10 = config.monitor.videoFormat == 2 && video::active_av1_mode >= 3;
     const bool pyrowave_10bit = pyrowave_session && video::active_pyrowave_mode >= 2;
     const bool supports_10bit_dynamic_range = hevc_main10 || av1_main10 || pyrowave_10bit;
     config.monitor.force_sdr = session->force_sdr;
-    if (prefer_10bit_sdr) {
+    if (packed_444) {
+      // The announced depth is final for a packed stream: no upgrade of an 8-bit request and no
+      // downgrade of a 10-bit one. prefer_sdr_10bit and force_sdr only change the content
+      // (SDR codes in a 10-bit stream), never the depth.
+      config.monitor.prefer_sdr_10bit = prefer_10bit_sdr && config.monitor.dynamicRange == 1;
+      if (config.monitor.prefer_sdr_10bit) {
+        BOOST_LOG(info) << "Packed 4:4:4 is 10-bit and 10-bit SDR is enabled for the client; packing SDR content"sv;
+      }
+    } else if (prefer_10bit_sdr) {
       if (supports_10bit_dynamic_range) {
         BOOST_LOG(info) << "Client requested HDR, but 10-bit SDR is enabled for it; encoding Main10 without HDR";
         config.monitor.dynamicRange = 1;

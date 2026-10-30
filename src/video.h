@@ -8,6 +8,7 @@
 #include "input.h"
 #include "platform/common.h"
 #include "pyrowave_policy.h"
+#include "video_packed444.h"
 #include "video_policy.h"
 #include "video_capture_source.h"
 #include "thread_safe.h"
@@ -105,6 +106,9 @@ namespace video {
     // is PyroWave, which pins and reads each capture image's own texture and
     // keyed mutex, so the capture must give every image a stable copy.
     bool shared_capture_pyrowave = false;
+    // Packed 4:4:4 (video_packed444.h): 0 - off, 1 - on. width/height stay the logical size;
+    // the encoder is created at video::packed444::coded_size(width, height).
+    int chroma_packing = 0;
   };
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
@@ -472,6 +476,11 @@ namespace video {
    * selection, so this is independent of the chosen hardware encoder.
    */
   extern std::atomic_int active_pyrowave_mode;
+  /**
+   * Packed 4:4:4 modes (video_packed444.h mode bits) the active encoder can serve: only the native
+   * NVENC D3D11 path, 8-bit per codec in use and 10-bit where Main10 passed. 0 when none.
+   */
+  unsigned packed444_offered_modes();
   extern bool last_encoder_probe_supported_ref_frames_invalidation;
   extern std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec;  // 0 - H.264, 1 - HEVC, 2 - AV1
 

@@ -149,6 +149,7 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/video_fec.h"
         "${CMAKE_SOURCE_DIR}/src/video_colorspace.cpp"
         "${CMAKE_SOURCE_DIR}/src/video_colorspace.h"
+        "${CMAKE_SOURCE_DIR}/src/video_packed444.h"
         "${CMAKE_SOURCE_DIR}/src/pyrowave_host.cpp"
         "${CMAKE_SOURCE_DIR}/src/pyrowave_host.h"
         "${CMAKE_SOURCE_DIR}/src/pyrowave_policy.cpp"

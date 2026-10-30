@@ -1374,6 +1374,7 @@ if(SUNSHINE_TEST_ENABLE_COMPONENT AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 sunshine_register_component(NAME test_component_present_timing_policy TEST_SOURCE unit/test_present_timing_policy.cpp)
 sunshine_register_component(NAME test_component_encoder_probe_policy TEST_SOURCE unit/test_encoder_probe_policy.cpp)
+sunshine_register_component(NAME test_component_video_packed444 TEST_SOURCE unit/test_video_packed444.cpp)
 sunshine_register_component(NAME test_component_focus_hints TEST_SOURCE unit/test_focus_hints.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/focus_hints.cpp")
 sunshine_register_component(NAME test_component_client_roaming TEST_SOURCE unit/test_client_roaming.cpp

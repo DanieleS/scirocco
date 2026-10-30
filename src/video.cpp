@@ -2764,6 +2764,19 @@ namespace video {
   int active_hevc_mode;
   int active_av1_mode;
   std::atomic_int active_pyrowave_mode {0};
+
+  unsigned packed444_offered_modes() {
+#ifdef _WIN32
+    // Only the native NVENC D3D11 path packs; the other encoders never offer it.
+    if (chosen_encoder != &nvenc) {
+      return 0;
+    }
+    return packed444::offered_modes(active_hevc_mode, active_av1_mode);
+#else
+    return 0;
+#endif
+  }
+
   bool last_encoder_probe_supported_ref_frames_invalidation = false;
   std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec = {};
   std::atomic<std::int64_t> last_negative_hdr_advertisement_probe_ns {0};
