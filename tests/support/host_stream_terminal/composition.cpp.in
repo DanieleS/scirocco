@@ -6,6 +6,7 @@
 #include "src/capture_action.h"
 #include "src/focus_hints.h"
 #include "src/video_fec.h"
+#include "src/video_packed444.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -57,7 +58,7 @@ template<class F> guard<F> fail_guard(F f){return {f};}
 namespace audio { struct config_t {enum {HOST_AUDIO,HIGH_QUALITY,CUSTOM_SURROUND_PARAMS,CONTINUOUS_AUDIO};}; }
 namespace stream {
 struct monitor_t {
- int height=0,width=0,framerate=0,encodingFramerate=0,framerateX100=0,bitrate=0,client_requested_bitrate=0,slicesPerFrame=0,numRefFrames=0,encoderCscMode=0,videoFormat=0,dynamicRange=0,chromaSamplingType=0,enableIntraRefresh=0,packetsize=0,pyrowave_min_parity_shards=0;
+ int height=0,width=0,framerate=0,encodingFramerate=0,framerateX100=0,bitrate=0,client_requested_bitrate=0,slicesPerFrame=0,numRefFrames=0,encoderCscMode=0,videoFormat=0,dynamicRange=0,chromaSamplingType=0,chroma_packing=0,enableIntraRefresh=0,packetsize=0,pyrowave_min_parity_shards=0;
  bool input_only=false,vrr_low_latency=false,force_sdr=false,prefer_sdr_10bit=false; std::uint64_t pyrowave_peer_link_bps=0,pyrowave_peer_pace_bps=0; int pyrowave_framing=0;
  std::shared_ptr<video_fec::budget_t> fec_budget;
 };
@@ -89,8 +90,8 @@ std::shared_ptr<session_t> alloc(const config_t &,auto &launch) {auto s=std::mak
 int start(session_t &,const std::string &) {++running;armed=true;return 0;}
 }
 }
-namespace config { struct {int fec_percentage=0,packetsize=0;std::chrono::seconds ping_timeout{5};} stream; struct {bool focus_hints=false; capture_action::provider_t capture_provider=capture_action::provider_t::off;} input; struct {bool limit_framerate=false;int max_bitrate=0;} video; constexpr int PACKETSIZE_MIN=100,PACKETSIZE_MAX=2000,PACKETSIZE_SMALL=500,PACKETSIZE_LARGE=1400; constexpr int ENCRYPTION_MODE_MANDATORY=1; void maybe_apply_deferred() {} struct Gate {~Gate(){}}; Gate acquire_apply_read_gate(){return {};}}
-namespace video {int active_hevc_mode=3,active_av1_mode=3,active_pyrowave_mode=2;}
+namespace config { struct {int fec_percentage=0,packetsize=0;bool experimental_packed_444=false;std::chrono::seconds ping_timeout{5};} stream; struct {bool focus_hints=false; capture_action::provider_t capture_provider=capture_action::provider_t::off;} input; struct {bool limit_framerate=false;int max_bitrate=0;} video; constexpr int PACKETSIZE_MIN=100,PACKETSIZE_MAX=2000,PACKETSIZE_SMALL=500,PACKETSIZE_LARGE=1400; constexpr int ENCRYPTION_MODE_MANDATORY=1; void maybe_apply_deferred() {} struct Gate {~Gate(){}}; Gate acquire_apply_read_gate(){return {};}}
+namespace video {int active_hevc_mode=3,active_av1_mode=3,active_pyrowave_mode=2;unsigned packed444_offered_modes(){return 0;}}
 namespace net {int encryption_mode_for_address(int) {return 0;}}
 namespace platf {std::uint64_t routed_link_bps(int,int){return 0;}}
 namespace pyrowave {

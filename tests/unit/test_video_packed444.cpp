@@ -48,7 +48,7 @@ TEST(Packed444Size, CodedSizeExamples) {
   EXPECT_EQ(packed::coded_size(1920, 1080), (packed::dimensions_t {1920, 2160}));
   EXPECT_EQ(packed::coded_size(2560, 1440), (packed::dimensions_t {2560, 2880}));
   EXPECT_EQ(packed::coded_size(1280, 720), (packed::dimensions_t {1280, 1440}));
-  EXPECT_EQ(packed::coded_size(3840, 2160), (packed::dimensions_t {3840, 4352}));
+  EXPECT_EQ(packed::coded_size(3840, 2160), (packed::dimensions_t {3840, 4320}));
   EXPECT_EQ(packed::coded_size(66, 66), (packed::dimensions_t {128, 144}));
   EXPECT_EQ(packed::coded_size(1, 1), (packed::dimensions_t {64, 16}));
 }
