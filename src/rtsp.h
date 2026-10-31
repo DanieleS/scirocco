@@ -7,6 +7,7 @@
 // standard includes
 #include "config.h"
 #include "framegen_policy.h"
+#include "hdr/client_display_capabilities.h"
 #include "hdr_stream_policy.h"
 #include "remote_session.h"
 
@@ -110,6 +111,9 @@ namespace rtsp_stream {
     // `supportedVideoFormats & VIDEO_FORMAT_MASK_10BIT`, so it is also the only wire signal
     // telling us the client negotiated a 10-bit decoder profile.
     bool enable_hdr;
+    // Luminance of the client's own screen from the optional maxBrightness, minBrightness and
+    // maxAverageBrightness launch parameters. Only meaningful together with enable_hdr.
+    std::optional<hdr::client_display_capabilities_t> client_display_luminance;
     // Per-client opt-in: stream an HDR-requesting client as 10-bit SDR instead. The display
     // stays out of HDR and the encode stays Main10, which the client can decode because it
     // asked for HDR in the first place.

@@ -820,6 +820,7 @@ sunshine_register_component(NAME test_component_pairing_recovery TEST_SOURCE uni
     LINK_LIBRARIES Boost::property_tree nlohmann_json::nlohmann_json OpenSSL::Crypto
                    $<$<PLATFORM_ID:Windows>:advapi32> $<$<PLATFORM_ID:Windows>:shell32>)
 sunshine_register_component(NAME test_component_virtual_display_scale TEST_SOURCE unit/test_virtual_display_scale.cpp)
+sunshine_register_component(NAME test_component_client_display_capabilities TEST_SOURCE unit/test_client_display_capabilities.cpp)
 
 # The additive host policy deliberately compiles against the pinned 3.7 control
 # headers. A newer installed producer is authorized only by its queried ABI.
