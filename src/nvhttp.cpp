@@ -72,6 +72,7 @@
 #include "power_action_http.h"
 #include "nvhttp_bitrate_policy.h"
 #include "nvhttp_dispatch.h"
+#include "hdr/client_display_capabilities.h"
 #include "remote_session.h"
 #include "remote_display_topology.h"
 #include "platform/common.h"
@@ -2255,6 +2256,58 @@ namespace nvhttp {
       return it->second;
     }
 
+    // The optional screen luminance a client reports with hdrMode=1. A missing, incomplete or
+    // invalid report is never an error: the launch proceeds with the configured peak.
+    std::optional<hdr::client_display_capabilities_t> parse_launch_client_luminance(const args_t &args, const bool log_rejection) {
+      if (!util::from_view(get_arg(args, "hdrMode", "0"))) {
+        return std::nullopt;
+      }
+      const auto parsed = hdr::parse_client_display_capabilities(
+        get_arg(args, "maxBrightness", ""),
+        get_arg(args, "minBrightness", ""),
+        get_arg(args, "maxAverageBrightness", "")
+      );
+      using status_e = hdr::client_display_parse_status_e;
+      switch (parsed.status) {
+        case status_e::valid:
+          return parsed.capabilities;
+        case status_e::absent:
+          break;
+        case status_e::incomplete:
+        case status_e::malformed:
+        case status_e::out_of_range:
+          if (log_rejection) {
+            BOOST_LOG(warning) << "Ignoring client HDR luminance report ("
+                               << (parsed.status == status_e::incomplete ? "incomplete" :
+                                   parsed.status == status_e::malformed  ? "malformed" :
+                                                                           "out of range")
+                               << "); using the configured HDR peak.";
+          }
+          break;
+      }
+      return std::nullopt;
+    }
+
+#ifdef _WIN32
+    // Lowest-priority HDR peak source: the client's reported screen, applied only when neither an
+    // explicit override nor an MHC2 profile peak already set rtx_hdr_peak_brightness.
+    void insert_client_luminance_peak_override(
+      std::unordered_map<std::string, std::string> &overrides,
+      const args_t &args
+    ) {
+      if (overrides.contains("rtx_hdr_peak_brightness")) {
+        return;
+      }
+      if (const auto report = parse_launch_client_luminance(args, false)) {
+        const auto peak = hdr::clamp_peak_for_driver(report->max_nits);
+        overrides.insert_or_assign("rtx_hdr_peak_brightness", std::to_string(peak));
+        BOOST_LOG(info) << "HDR peak: using " << peak << " nits from the client report (reported "
+                        << report->max_nits << " peak, " << report->min_nits << " black, "
+                        << report->max_average_nits << " average nits).";
+      }
+    }
+#endif
+
 
     // Helper function to extract command entries from a JSON object.
     cmd_list_t extract_command_entries(const nlohmann::json &j, const std::string &key) {
@@ -3028,6 +3081,7 @@ namespace nvhttp {
       launch_session->lossless_scaling_rtss_limit.reset();
       launch_session->frame_generation_provider = "lossless-scaling";
       launch_session->client_vrr_requested = false;
+      launch_session->client_display_luminance.reset();
 #ifdef _WIN32
 #endif
       const auto identity_uuid = resolved_client_identity ? resolved_client_identity->uuid : (verified_client ? verified_client->uuid : std::string());
@@ -3336,6 +3390,7 @@ namespace nvhttp {
           0;
       launch_session->enable_hdr = util::from_view(get_arg(args, "hdrMode", "0"));
       launch_session->client_vrr_requested = util::from_view(get_arg(args, "clientVrrRequested", "0"));
+      launch_session->client_display_luminance = parse_launch_client_luminance(args, true);
       auto color_app_ctx = launch_app_ctx;
       const auto current_color_app_id = proc::proc.current_app_id();
       const auto color_control = launch_identity_control;
@@ -4332,6 +4387,8 @@ namespace nvhttp {
         codec_mode_flags |= pyrowave::protocol::SCM_MASK_PYROWAVE;
       }
       tree.put("root.ServerCodecModeSupport", codec_mode_flags);
+      // Capability bit for clients: this host reads the screen luminance they report at launch.
+      tree.put("root.ClientLuminanceSupported", 1);
 
       tree.put("root.PairStatus", pair_status);
     // This is the host's outbound physical link, not measured end-to-end
@@ -5082,6 +5139,7 @@ namespace nvhttp {
                 );
               }
             }
+            insert_client_luminance_peak_override(overrides, args);
 #endif
             config::set_runtime_config_overrides(std::move(overrides));
             runtime_overrides_applied = true;
@@ -5442,6 +5500,7 @@ launch_session->exact_target_hold.reset();
               }
             }
           }
+          insert_client_luminance_peak_override(overrides, args);
 #endif
 
           config::set_runtime_config_overrides(std::move(overrides));
@@ -6065,6 +6124,7 @@ launch_session->exact_target_hold.reset();
         requested_runtime_overrides.insert_or_assign("rtx_hdr_peak_brightness", std::to_string(effective_peak));
       }
     }
+    insert_client_luminance_peak_override(requested_runtime_overrides, args);
 #endif
 
     if (!no_active_sessions &&

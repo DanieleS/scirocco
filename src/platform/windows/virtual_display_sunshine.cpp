@@ -17,6 +17,7 @@
 #include <openssl/rand.h>
 
 #include "src/color_profile_policy.h"
+#include "src/hdr/client_display_capabilities.h"
 #include "src/config.h"
 #include "src/capture_recovery.h"
 #include "src/globals.h"
@@ -244,6 +245,29 @@ namespace VDISPLAY_SUNSHINE {
     std::atomic<std::int64_t> g_last_teardown_ns {0};
     std::atomic<std::int64_t> g_last_restart_failure_ns {0};
     std::recursive_mutex g_virtual_display_operation_mutex;
+
+    // The HDR peak programmed when a virtual display was created, by display guid. Only creation
+    // writes it, never a reuse, so small per-session drifts accumulate against what the driver
+    // really advertises. Guarded by g_virtual_display_operation_mutex.
+    struct programmed_hdr_peak_t {
+      std::uint32_t nits = 0;
+      std::string client_uid;
+    };
+    std::map<std::string, programmed_hdr_peak_t> g_programmed_hdr_peaks;
+
+    std::uint32_t effective_hdr_peak_nits() {
+      return static_cast<std::uint32_t>(std::clamp(config::video.rtx_hdr.peak_brightness, 400, 2000));
+    }
+
+    // Unknown programmed peak (display adopted after a host restart) keeps today's reuse behavior.
+    bool programmed_hdr_peak_allows_reuse(const std::string &guid_key, const char *client_uid, const std::uint32_t requested_nits) {
+      const auto it = g_programmed_hdr_peaks.find(guid_key);
+      if (it == g_programmed_hdr_peaks.end()) {
+        return true;
+      }
+      const bool client_changed = it->second.client_uid != (client_uid ? client_uid : "");
+      return hdr::peak_matches_for_reuse(it->second.nits, requested_nits, client_changed);
+    }
     std::mutex g_ensure_display_acquire_mutex;
     std::mutex g_ensure_display_state_mutex;
     std::condition_variable g_ensure_display_state_cv;
@@ -7135,6 +7159,18 @@ namespace VDISPLAY_SUNSHINE {
                 requested_uuid,
                 "securely reclaimed Sunshine virtual display"
               );
+            // A reused display keeps the HDR peak it was created with, so a changed peak
+            // (another client, or a different screen) needs a fresh display.
+            const bool hdr_peak_reusable = programmed_hdr_peak_allows_reuse(
+              requested_uuid.string(),
+              s_client_uid,
+              effective_hdr_peak_nits()
+            );
+            if (!hdr_peak_reusable) {
+              BOOST_LOG(info) << "Reclaimed virtual display was created with a different HDR peak than the "
+                              << effective_hdr_peak_nits() << " nits this session needs; recreating it"
+                              << " (guid=" << requested_uuid.string() << ").";
+            }
             const auto existing_presence = existing_virtual_display_presence(display_id);
             // REVERT can leave the retained target present but inactive. Departing
             // that PnP monitor and immediately arriving the same stable connector
@@ -7154,7 +7190,7 @@ namespace VDISPLAY_SUNSHINE {
                 replace_existing && (!requested_resolution_only || !requested_refresh_available),
                 existing_presence == ExistingVirtualDisplayPresence::inactive,
                 requested_refresh_available,
-                reusable_with_current_provenance
+                reusable_with_current_provenance && hdr_peak_reusable
               );
             if (replace_existing &&
                 existing_presence == ExistingVirtualDisplayPresence::inactive &&
@@ -7255,9 +7291,7 @@ namespace VDISPLAY_SUNSHINE {
         return std::nullopt;
       }
       create_request.requested_timeout_ms = DRIVER_LEASE_TIMEOUT_MS;
-      create_request.hdr_max_luminance_nits = static_cast<std::uint32_t>(
-        std::clamp(config::video.rtx_hdr.peak_brightness, 400, 2000)
-      );
+      create_request.hdr_max_luminance_nits = effective_hdr_peak_nits();
       const auto temporary_display_name = make_temporary_display_name(s_client_name);
       std::memcpy(create_request.display_name, temporary_display_name.data(), temporary_display_name.size());
 
@@ -7278,6 +7312,12 @@ namespace VDISPLAY_SUNSHINE {
         owned_request.display = create_request;
         owned_request.owner_capability = *owner_capability;
         create_result = client.create_temporary_display_owned(owned_request);
+        if (create_result.ok()) {
+          g_programmed_hdr_peaks.insert_or_assign(
+            requested_uuid.string(),
+            programmed_hdr_peak_t {create_request.hdr_max_luminance_nits, s_client_uid ? s_client_uid : ""}
+          );
+        }
       }
       if (!create_result.ok()) {
         const DWORD error_code = create_result.native_error;
@@ -8283,6 +8323,7 @@ namespace VDISPLAY_SUNSHINE {
       abort_recovery_monitor(guid_uuid);
     }
     std::lock_guard<std::recursive_mutex> operation_lock(g_virtual_display_operation_mutex);
+    g_programmed_hdr_peaks.erase(guid_uuid.string());
     if (!ensure_virtual_display_process_ownership()) {
       BOOST_LOG(error) << "Virtual display removal refused because another process owns the recovery journal.";
       return false;

@@ -231,6 +231,7 @@ namespace rtsp_stream {
     snapshot->client_display_mode_override = client_display_mode_override;
     snapshot->client_display_refresh_millihz = client_display_refresh_millihz;
     snapshot->enable_hdr = enable_hdr;
+    snapshot->client_display_luminance = client_display_luminance;
     snapshot->prefer_sdr_10bit = prefer_sdr_10bit;
     snapshot->force_sdr = force_sdr;
     snapshot->client_vrr_requested = client_vrr_requested;
