@@ -105,6 +105,10 @@ namespace VDISPLAY {
     return std::nullopt;
   }
 }  // namespace VDISPLAY
+
+using args_t = std::unordered_multimap<std::string, std::string>;
+// The client luminance report is not part of this fixture: no report, no peak override.
+void insert_client_luminance_peak_override(std::unordered_map<std::string, std::string> &, const args_t &) {}
 #endif
 
 namespace remote_display_topology {
@@ -333,6 +337,7 @@ int launch(std::string client, std::uint32_t generation, control_e synthetic_con
       std::string hdr_profile;
     };
     const std::optional<client_settings_t> client_settings;
+    const args_t args;
 #endif
     const auto previous_runtime_overrides = config::runtime_overrides;
     bool runtime_overrides_applied = false;
