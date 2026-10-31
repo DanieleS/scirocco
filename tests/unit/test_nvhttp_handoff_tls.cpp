@@ -235,7 +235,11 @@ namespace {
   protected:
     void SetUp() override {
       clients = {{client_uuid, "client", client_credentials().x509, true}};
-      chain.add(crypto::x509(client_credentials().x509));
+      auto native_client = std::make_shared<crypto::named_cert_t>();
+      native_client->uuid = client_uuid;
+      native_client->cert = client_credentials().x509;
+      native_client->perm = crypto::PERM::_all;
+      chain.add(native_client);
     }
     tls_identity::store_t store;
     crypto::cert_chain_t chain;
