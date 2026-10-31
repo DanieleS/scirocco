@@ -2631,11 +2631,11 @@ namespace stream {
         fec_blocks_begin = std::begin(fec_blocks),
         fec_blocks_end = std::begin(fec_blocks) + fec_blocks_needed;
 
-      // When enabled, the demand quantum limits one ordinary-stream send call;
-      // it does not cap aggregate sends before the next pacing wait.
-      // Keep the downstream frame deadline/cumulative pacing calculations intact.
+      // Both ordinary demand modes use this frame's actual FEC packet count.
+      // The existing batch-only option preserves its deadline behavior; group
+      // pacing is a separate opt-in so saved configurations remain compatible.
       std::size_t pacing_frame_packets = total_shards;
-      if (!pyrowave_session && config::stream.pacing_batch_demand_limit) {
+      if (!pyrowave_session && (config::stream.pacing_batch_demand_limit || config::stream.pacing_group_demand_limit)) {
         pacing_frame_packets = 0;
         for (std::size_t x = 0; x < fec_blocks_needed; ++x) {
           const auto data_shards = (fec_blocks[x].size() + blocksize - 1) / blocksize;
@@ -2789,7 +2789,7 @@ namespace stream {
           ratecontrol_packets_in_1ms = adaptive_pace->packets_per_ms;
         }
 
-        if (!pyrowave_session && config::stream.pacing_batch_demand_limit) {
+        if (!pyrowave_session && (config::stream.pacing_batch_demand_limit || config::stream.pacing_group_demand_limit)) {
           const auto &monitor = session->config.monitor;
           const auto stream_kbps = session->video.pacing_bitrate_kbps.load(std::memory_order_relaxed);
           const auto ip_header_bytes = session->video.peer.address().is_v6() ? 40u : 20u;
@@ -2806,7 +2806,14 @@ namespace stream {
           );
         }
 
-        const auto ratecontrol_pace = adaptive_pace.value_or(pacing::packet_pace_t::fixed(ratecontrol_packets_in_1ms));
+        std::optional<pacing::packet_pace_t> ordinary_group_pace;
+        if (!pyrowave_session && config::stream.pacing_group_demand_limit) {
+          ordinary_group_pace = pacing::packet_pace_t::fixed(ordinary_batch_quantum_packets);
+          ratecontrol_packets_in_1ms = adaptive_pace ?
+            std::min(ratecontrol_packets_in_1ms, ordinary_batch_quantum_packets) : ordinary_batch_quantum_packets;
+        }
+        const auto ratecontrol_pace = adaptive_pace.value_or(
+          ordinary_group_pace.value_or(pacing::packet_pace_t::fixed(ratecontrol_packets_in_1ms)));
 
         // Send less than 64K in a single batch.
         // On Windows, batches above 64K seem to bypass SO_SNDBUF regardless of its size,
@@ -2818,7 +2825,7 @@ namespace stream {
         max_batch_size_bytes = pyrowave_session ?
                                  std::min(max_batch_size_bytes, ratecontrol_packets_in_1ms * datagram_size) :
                                  std::min<size_t>(max_batch_size_bytes, (size_t) config::stream.video_max_batch_size_kb * 1024);
-        if (!pyrowave_session && config::stream.pacing_batch_demand_limit) {
+        if (!pyrowave_session && (config::stream.pacing_batch_demand_limit || config::stream.pacing_group_demand_limit)) {
           max_batch_size_bytes = pacing::max_batch_bytes(max_batch_size_bytes, ordinary_batch_quantum_packets, datagram_size);
         }
         if (session->video.adaptive_pacing_enabled) {
@@ -2833,12 +2840,15 @@ namespace stream {
         const auto send_batch_size = video_send_batch_size(blocksize, prefix_size, max_batch_size_bytes);
 
         const auto frame_pacing_delay = [&](std::uint64_t packets_sent) {
-          const auto automatic_delay = ratecontrol_pace.offset(packets_sent);
+          auto automatic_delay = ratecontrol_pace.offset(packets_sent);
+          if (ordinary_group_pace) {
+            automatic_delay = std::max(automatic_delay, ordinary_group_pace->offset(packets_sent));
+          }
           if (pacing_ceiling == 0) {
             return automatic_delay;
           }
           const auto capped_delay = std::chrono::nanoseconds(video_pacing_delay_ns(packets_sent, datagram_size, pacing_ceiling));
-          return (pyrowave_session || adaptive_pace) ? std::max(automatic_delay, capped_delay) : capped_delay;
+          return (pyrowave_session || adaptive_pace || ordinary_group_pace) ? std::max(automatic_delay, capped_delay) : capped_delay;
         };
 
         // Don't ignore the last ratecontrol group of the previous frame

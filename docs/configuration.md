@@ -2804,6 +2804,20 @@ These settings are host-wide and are not application runtime overrides.
     </tr>
 </table>
 
+### pacing_group_demand_limit
+
+Experimental opt-in for ordinary video streams. Derive a fixed pacing quantum
+from the negotiated bitrate and this frame's actual FEC-expanded packet count.
+This bounds each send call and uses the quantum as the pacing wait threshold.
+A short FEC block tail can let a group exceed that threshold before the next
+wait. It does not guarantee a wire-level burst limit. The existing `pacing_batch_demand_limit`
+option remains an independent batch-only bound. Both options default to `false`.
+
+When combined with `host_adaptive_pacing`, use the smaller group and the later
+of the demand and adaptive deadlines. The operator's `pacing_max_bitrate_kbps`
+ceiling always applies, and accepted packets retain their debt across frames.
+PyroWave is unchanged. Example: `pacing_group_demand_limit = true`.
+
 ### host_adaptive_pacing
 
 <table>
