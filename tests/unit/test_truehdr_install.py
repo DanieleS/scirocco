@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Execute production CMake TrueHDR staging with controlled downloader edges."""
 from pathlib import Path
+from itertools import product
 import os
 import subprocess
 import tempfile
@@ -16,10 +17,11 @@ with tempfile.TemporaryDirectory(prefix='truehdr-install-') as tmp:
  fake.write_text('''#!/usr/bin/env python3
 import os,sys
 from pathlib import Path
+from itertools import product
 args=sys.argv[1:]
 assert args[args.index('-Repository')+1] == 'Nonary/vibeshine_truehdr_runtime'
 assert args[args.index('-Tag')+1] == 'v1.0.0'
-mode=os.environ['VIBEPOLLO_TRUEHDR_TEST_MODE']
+mode=os.environ['TRUEHDR_INSTALL_TEST_MODE']
 if mode=='failure':sys.exit(17)
 out=Path(args[args.index('-OutDir')+1]);out.mkdir(parents=True,exist_ok=True)
 for name in ['vibeshine_truehdr.dll','nvngx_truehdr.dll']:
@@ -27,16 +29,18 @@ for name in ['vibeshine_truehdr.dll','nvngx_truehdr.dll']:
  (out/name).write_bytes(b'' if mode=='empty' else b'fixture-runtime')
 ''')
  fake.chmod(0o755)
- for mode in ['success','failure','missing','empty']:
-  src=base/mode;src.mkdir();build=src/'build';prefix=src/'stage'
+ for mode, component in product(['success','failure','missing','empty'], [None, 'application']):
+  src=base/(mode+'-'+(component or 'all'));src.mkdir();build=src/'build';prefix=src/'stage'
   (src/'CMakeLists.txt').write_text('cmake_minimum_required(VERSION 3.20)\nproject(TrueHdrInstall NONE)\n'
     +f'include("{root}/cmake/packaging/windows_virtual_display_contract.cmake")\n'+block)
   # Old build trees may explicitly cache OFF; production must override it.
   subprocess.run(['cmake','-S',str(src),'-B',str(build),'-DSUNSHINE_REQUIRE_TRUEHDR_RUNTIME=OFF'],check=True,capture_output=True,text=True)
   cache=(build/'CMakeCache.txt').read_text()
   if 'SUNSHINE_REQUIRE_TRUEHDR_RUNTIME:BOOL=ON' not in cache:raise RuntimeError('required runtime remained optional')
-  env=dict(os.environ,PATH=str(tools)+os.pathsep+os.environ['PATH'],VIBEPOLLO_TRUEHDR_TEST_MODE=mode)
-  result=subprocess.run(['cmake','--install',str(build),'--prefix',str(prefix)],env=env,capture_output=True,text=True)
+  env=dict(os.environ,PATH=str(tools)+os.pathsep+os.environ['PATH'],TRUEHDR_INSTALL_TEST_MODE=mode)
+  command=['cmake','--install',str(build),'--prefix',str(prefix)]
+  if component:command.extend(['--component',component])
+  result=subprocess.run(command,env=env,capture_output=True,text=True)
   if mode=='success':
    if result.returncode:raise RuntimeError(result.stdout+result.stderr)
    for name in ['vibeshine_truehdr.dll','nvngx_truehdr.dll']:
