@@ -7,6 +7,7 @@
 // standard includes
 #include "config.h"
 #include "framegen_policy.h"
+#include "hdr/client_display_capabilities.h"
 #include "hdr_stream_policy.h"
 #include "remote_session.h"
 
