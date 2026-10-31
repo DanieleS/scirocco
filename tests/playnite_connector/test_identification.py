@@ -20,6 +20,7 @@ def function(text, marker):
     return text[start:end]
 
 named_setter = function(source, '  void NamedPipeFactory::set_client_identification_only()')
+data_setter = function(source, '  void NamedPipeFactory::set_client_data_access_only()')
 anonymous_setter = function(source, '  void AnonymousPipeFactory::set_client_identification_only()')
 named_quiet = function(source, '  void NamedPipeFactory::set_quiet_connect_failures()')
 anonymous_quiet = function(source, '  void AnonymousPipeFactory::set_quiet_connect_failures()')
@@ -30,6 +31,7 @@ field = '\n    '.join(re.search(pattern, header).group() for pattern in [
     r'DWORD _client_security_flags\s*=\s*[^;]+;',
     r'bool _quiet_connect_failures\s*=\s*[^;]+;',
     r'mutable DWORD _last_connect_error\s*=\s*[^;]+;',
+    r'bool _client_data_access_only\s*=\s*[^;]+;',
 ])
 fixture = r'''
 #include <algorithm>
@@ -47,17 +49,20 @@ constexpr DWORD SECURITY_SQOS_PRESENT = 0x100000;
 constexpr DWORD SECURITY_IDENTIFICATION = 0x10000;
 constexpr DWORD FILE_FLAG_OVERLAPPED = 0x40000000;
 constexpr DWORD GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000, OPEN_EXISTING = 3;
+constexpr DWORD FILE_READ_DATA = 1, FILE_WRITE_DATA = 2, SYNCHRONIZE = 0x00100000;
 constexpr DWORD ERROR_PIPE_BUSY = 231, ERROR_FILE_NOT_FOUND = 2;
 #define BOOST_LOG(level) std::cout
 namespace winrt { struct file_handle { uintptr_t value = 0; explicit operator bool() const { return value != 0; } }; }
 static std::vector<DWORD> opens;
+static std::vector<DWORD> accesses;
 static DWORD failure = 0;
 ULONGLONG GetTickCount64() { static ULONGLONG tick = 0; return ++tick; }
 DWORD GetLastError() { return failure; }
 void WaitNamedPipeW(const wchar_t *, int) {}
 void Sleep(int) {}
-uintptr_t CreateFileW(const wchar_t *, DWORD, DWORD, void *, DWORD, DWORD flags, void *) {
+uintptr_t CreateFileW(const wchar_t *, DWORD access, DWORD, void *, DWORD, DWORD flags, void *) {
     opens.push_back(flags);
+    accesses.push_back(access);
     return failure ? 0 : 1;
 }
 namespace platf::dxgi {
@@ -69,6 +74,7 @@ public:
     void set_client_identification_only();
     void set_quiet_connect_failures();
     DWORD last_connect_error() const { return _last_connect_error; }
+    void set_client_data_access_only();
     winrt::file_handle create_client_pipe(const std::wstring &, const std::function<bool()> &,
                                           std::chrono::steady_clock::time_point) const;
 };
@@ -86,6 +92,7 @@ public:
     }
 };
 NAMED_SETTER
+DATA_SETTER
 ANONYMOUS_SETTER
 NAMED_QUIET
 ANONYMOUS_QUIET
@@ -113,6 +120,14 @@ int main() {
     assert(opens[2] == opens[1]);
     assert(other.create_client_pipe(L"other-again", {}, deadline));
     assert(opens.back() == FILE_FLAG_OVERLAPPED);
+    assert(accesses.size() == 4);
+    for (const auto access : accesses) assert(access == (GENERIC_READ | GENERIC_WRITE));
+    platf::dxgi::NamedPipeFactory restricted;
+    restricted.set_client_data_access_only();
+    assert(restricted.create_client_pipe(L"data-only", {}, deadline));
+    assert(accesses.back() == (FILE_READ_DATA | FILE_WRITE_DATA | SYNCHRONIZE));
+    assert(other.create_client_pipe(L"default-after-data-only", {}, deadline));
+    assert(accesses.back() == (GENERIC_READ | GENERIC_WRITE));
     failure = 5;
     assert(!playnite.connect_to_plugin(error));
     assert(opens.back() == (FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION));
@@ -121,6 +136,7 @@ int main() {
 }
 '''
 for marker, value in [('FIELD', field), ('NAMED_SETTER', named_setter),
+                      ('DATA_SETTER', data_setter),
                       ('ANONYMOUS_SETTER', anonymous_setter), ('PIPE_OPEN', pipe_open),
                       ('NAMED_QUIET', named_quiet), ('ANONYMOUS_QUIET', anonymous_quiet),
                       ('CLIENT_WAIT', client_wait),
