@@ -476,7 +476,12 @@ std::optional<process_snapshot> snapshot_processes() {
     }
     const auto parent = read_proc_stat(*pid);
     if (!parent) {
-      result.complete = false;
+      // Exiting between lstat and the stat read means the PID is gone, not
+      // unreadable; only a PID that still exists makes the snapshot incomplete.
+      struct stat still_there {};
+      if (::lstat(pid_directory.c_str(), &still_there) == 0) {
+        result.complete = false;
+      }
       continue;
     }
     process_info info;
