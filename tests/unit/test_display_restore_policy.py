@@ -42,7 +42,7 @@ assert "SeTakeOwnershipPrivilege" not in paths
 assert "is_private_system_dacl" in paths
 assert "MoveFileExW" not in paths and 'L".untrusted-"' not in paths
 assert "HKEY_LOCAL_MACHINE" in paths
-assert 'L"SOFTWARE\\\\Nonary\\\\Vibeshine\\\\DisplayHelper"' in paths
+assert 'L"SOFTWARE\\\\Nonary\\\\Vibepollo\\\\DisplayHelper"' in paths
 assert 'L"SnapshotDirectory"' in paths
 assert "KEY_WOW64_64KEY" in paths
 assert 'L"O:SYG:SYD:P(A;;KA;;;SY)(A;;KA;;;BA)"' in paths
