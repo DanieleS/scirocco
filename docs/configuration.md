@@ -767,14 +767,14 @@ controller of another client. This option does not create or redirect controller
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Select how Vibeshine sends keyboard and mouse input on Windows. `auto` (the default)
+            Select how Vibepollo sends keyboard and mouse input on Windows. `auto` (the default)
             prefers VHF when a compatible driver is available at input initialization and otherwise
             uses Windows SendInput. `sendinput` always uses Windows SendInput; `vhf` explicitly
             prefers virtual HID devices. Existing explicit settings are preserved. Backend selection
             does not switch automatically just because a game starts or stops.
             VHF requires a compatible virtual input driver
-            and Vibeshine running as SYSTEM or an elevated administrator. If the driver is missing,
-            lacks the capability, or access is denied, Vibeshine uses SendInput. Auto logs this normal
+            and Vibepollo running as SYSTEM or an elevated administrator. If the driver is missing,
+            lacks the capability, or access is denied, Vibepollo uses SendInput. Auto logs this normal
             fallback as informational; an explicitly selected VHF backend logs a warning.
             The bundled driver supports VHF keyboard and mouse input.
             VHF keyboard repeat follows Windows settings; a modifier sent only as a temporary
@@ -782,7 +782,7 @@ controller of another client. This option does not create or redirect controller
             Unicode text, unsupported keys, and absolute pointer positions outside the primary display
             use SendInput. Mixed VHF and SendInput events may be processed in a different order, which
             can affect absolute dragging on secondary displays. The keyboard and mouse enable settings
-            still apply. Restart Vibeshine after changing this setting.
+            still apply. Restart Vibepollo after changing this setting.
             @caution{Applies to Windows only. VHF requires a compatible virtual input driver.}
         </td>
     </tr>
