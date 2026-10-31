@@ -87,7 +87,8 @@ describe('legacy editor Playnite fullscreen metadata', () => {
         expect(state.form.waitAll).toBe(true);
         state.form.waitAll = false;
         await state.save();
-        const saves = () => post.mock.calls.filter(([url]) => url === '/api/apps');
+        const saves = () => post.mock.calls.filter(([url]) => url === './api/apps');
+        expect(saves()).toHaveLength(1);
         const payload = saves()[0][1] as Record<string, unknown>;
         expect(payload.uuid).toBe(app.uuid);
         expect(payload['wait-all']).toBe(false);
@@ -100,7 +101,9 @@ describe('legacy editor Playnite fullscreen metadata', () => {
           await wrapper.setProps({ modelValue: false, app: nextApp });
           await wrapper.setProps({ modelValue: true });
           await flushPromises();
+          const previousSaveCount = saves().length;
           await state.save();
+          expect(saves()).toHaveLength(previousSaveCount + 1);
           expect(saves().slice(-1)[0][1]).not.toHaveProperty('playnite-fullscreen');
         }
       } finally {
