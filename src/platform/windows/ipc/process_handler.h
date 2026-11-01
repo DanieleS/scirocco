@@ -6,6 +6,7 @@
 
 // standard includes
 #include <string>
+#include <span>
 
 // local includes
 #include "src/platform/windows/ipc/misc_utils.h"
@@ -63,13 +64,19 @@ public:
    *              the read ends here. Handle inheritance is restricted to exactly
    *              the two write ends, so asking for capture does not hand the
    *              child anything else this process happens to hold.
+   * @param inherited_handles Additional inheritable handles the child must receive.
+   *              Inheritance is restricted to these handles (plus the capture
+   *              pipes). When the parent is SYSTEM and handles are passed, the
+   *              child's process object is also denied to non-admin users so
+   *              they cannot duplicate the inherited capabilities.
    * @return `true` on successful launch, `false` otherwise.
    */
   bool start(
     const std::wstring &application_path,
     std::wstring_view arguments,
     bool allow_system_fallback = false,
-    helper_pipes_t *pipes = nullptr
+    helper_pipes_t *pipes = nullptr,
+    std::span<const HANDLE> inherited_handles = {}
   );
 
   /**
