@@ -418,6 +418,24 @@ sunshine_add_test_target(
 if(SUNSHINE_TEST_ENABLE_COMPONENT)
     find_package(Threads REQUIRED)
     if(SUNSHINE_TEST_PYTHON_EXECUTABLE)
+        set(_launch_resolution_fixture "${CMAKE_CURRENT_BINARY_DIR}/launch-resolution/test.cpp")
+        add_custom_command(
+            OUTPUT "${_launch_resolution_fixture}"
+            COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
+                "${CMAKE_CURRENT_LIST_DIR}/unit/test_launch_resolution.py"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}" --generate-only --output "${_launch_resolution_fixture}"
+            DEPENDS
+                "${CMAKE_CURRENT_LIST_DIR}/unit/test_launch_resolution.py"
+                "${CMAKE_CURRENT_LIST_DIR}/unit/test_launch_resolution.cpp.in"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/process.cpp"
+            VERBATIM)
+        sunshine_add_test_target(
+            NAME test_component_launch_resolution
+            CATEGORY component
+            TEST_SOURCES "${CMAKE_CURRENT_LIST_DIR}/tests_main.cpp" "${_launch_resolution_fixture}"
+            LINK_LIBRARIES GTest::gtest Threads::Threads
+        )
+        set_tests_properties(test_component_launch_resolution PROPERTIES TIMEOUT 30)
         set(_pairing_transaction_fixture "${CMAKE_CURRENT_BINARY_DIR}/pairing-transaction/test.cpp")
         add_custom_command(
             OUTPUT "${_pairing_transaction_fixture}"

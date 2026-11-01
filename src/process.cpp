@@ -1508,17 +1508,34 @@ namespace proc {
     }
 
     if (!has_resolution_override && scale_factor != 100) {
-      render_width *= ((float) scale_factor / 100);
-      render_height *= ((float) scale_factor / 100);
-
-      // Chop the last bit to ensure the scaled resolution is even numbered
-      // Most odd resolutions won't work well
-      render_width &= ~1;
-      render_height &= ~1;
+      const auto scale_dimension = [scale_factor](uint32_t dimension) -> std::optional<uint32_t> {
+        const auto scaled = static_cast<uint64_t>(dimension) * static_cast<uint64_t>(scale_factor) / 100u;
+        const auto even = scaled & ~uint64_t {1};
+        if (even == 0 || even > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+          return std::nullopt;
+        }
+        return static_cast<uint32_t>(even);
+      };
+      const auto width = scale_dimension(client_width);
+      const auto height = scale_dimension(client_height);
+      if (width && height) {
+        render_width = *width;
+        render_height = *height;
+      }
     }
 
-    launch_session->width = render_width;
-    launch_session->height = render_height;
+    // Display size is separate from the negotiated stream viewport. Launches
+    // without an NVHTTP override (for example WebRTC) still need to pass the
+    // app-scaled or fallback size to display helpers without changing width/height.
+    if (!has_resolution_override &&
+        (render_width != launch_session->width || render_height != launch_session->height) &&
+        render_width <= static_cast<uint32_t>(std::numeric_limits<int>::max()) &&
+        render_height <= static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+      launch_session->resolution_override = rtsp_stream::launch_session_t::resolution_override_t {
+        .width = static_cast<int>(render_width),
+        .height = static_cast<int>(render_height),
+      };
+    }
 
     this->initial_display = config::video.output_name;
 
@@ -1839,8 +1856,8 @@ namespace proc {
     _env["APOLLO_CLIENT_NAME"] = launch_session->device_name;
     _env["APOLLO_CLIENT_WIDTH"] = std::to_string(render_width);
     _env["APOLLO_CLIENT_HEIGHT"] = std::to_string(render_height);
-    _env["APOLLO_CLIENT_RENDER_WIDTH"] = std::to_string(launch_session->width);
-    _env["APOLLO_CLIENT_RENDER_HEIGHT"] = std::to_string(launch_session->height);
+    _env["APOLLO_CLIENT_RENDER_WIDTH"] = std::to_string(render_width);
+    _env["APOLLO_CLIENT_RENDER_HEIGHT"] = std::to_string(render_height);
     _env["APOLLO_CLIENT_SCALE_FACTOR"] = std::to_string(scale_factor);
     _env["APOLLO_CLIENT_FPS"] = fps_scaled_str;
     _env["APOLLO_CLIENT_HDR"] = rtsp_stream::effective_hdr_requested(*launch_session) ? "true" : "false";
