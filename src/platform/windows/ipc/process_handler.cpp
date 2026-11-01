@@ -14,6 +14,7 @@
 #include <UserEnv.h>
 #include <windows.h>
 #include <WtsApi32.h>
+#include <sddl.h>
 
 // standard includes
 #include "src/logging.h"
@@ -119,6 +120,7 @@ namespace {
     const std::wstring &working_dir,
     DWORD creation_flags,
     BOOL inherit_handles,
+    SECURITY_ATTRIBUTES *process_attributes,
     STARTUPINFOEXW &si,
     PROCESS_INFORMATION &pi
   ) {
@@ -182,8 +184,8 @@ namespace {
         raw_primary_token,
         nullptr,
         (LPWSTR) cmd_line.c_str(),
-        nullptr,
-        nullptr,
+        process_attributes,
+        process_attributes,
         inherit_handles,
         creation_flags,
         env_block,
@@ -227,7 +229,8 @@ bool ProcessHandler::start(
   const std::wstring &application_path,
   std::wstring_view arguments,
   bool allow_system_fallback,
-  helper_pipes_t *pipes
+  helper_pipes_t *pipes,
+  std::span<const HANDLE> inherited_handles
 ) {
   if (running_) {
     // Check if the previously started process has already exited. If so, clear stale state.
@@ -291,11 +294,42 @@ bool ProcessHandler::start(
     si.StartupInfo.hStdError = err_pipe->write.get();
     si.StartupInfo.hStdInput = nullptr;
     inherited = {out_pipe->write.get(), err_pipe->write.get()};
+  }
+  inherited.insert(inherited.end(), inherited_handles.begin(), inherited_handles.end());
+  if (!inherited.empty()) {
     if (!handle_list.init(si, inherited)) {
       return false;
     }
     inherit_handles = TRUE;
   }
+
+  const bool parent_is_system = platf::is_running_as_system();
+
+  // A helper receiving privileged capabilities runs with the interactive
+  // user's token, so its process object must not grant that user
+  // PROCESS_DUP_HANDLE. The parent keeps its creation-time process handle;
+  // only SYSTEM and Administrators may open another one.
+  PSECURITY_DESCRIPTOR process_descriptor = nullptr;
+  SECURITY_ATTRIBUTES process_attributes {sizeof(process_attributes), nullptr, FALSE};
+  SECURITY_ATTRIBUTES *process_attributes_ptr = nullptr;
+  if (parent_is_system && !inherited_handles.empty()) {
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+          L"O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)",
+          SDDL_REVISION_1,
+          &process_descriptor,
+          nullptr
+        )) {
+      BOOST_LOG(error) << "Unable to build restricted child process security descriptor, error=" << GetLastError();
+      return false;
+    }
+    process_attributes.lpSecurityDescriptor = process_descriptor;
+    process_attributes_ptr = &process_attributes;
+  }
+  auto release_process_descriptor = util::fail_guard([&]() {
+    if (process_descriptor) {
+      LocalFree(process_descriptor);
+    }
+  });
 
   DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
   // When not using a job (keep-alive child), prefer to break away from any existing job to avoid kill-on-close
@@ -313,7 +347,7 @@ bool ProcessHandler::start(
 
   BOOL ret = FALSE;
 
-  if (platf::is_running_as_system()) {
+  if (parent_is_system) {
     HANDLE user_token = platf::retrieve_users_token(false);
     if (user_token) {
       auto close_token = util::fail_guard([&]() {
@@ -337,8 +371,8 @@ bool ProcessHandler::start(
         user_token,
         nullptr,
         (LPWSTR) cmd_line.c_str(),
-        nullptr,
-        nullptr,
+        process_attributes_ptr,
+        process_attributes_ptr,
         inherit_handles,
         creation_flags,
         env_block,
@@ -351,14 +385,14 @@ bool ProcessHandler::start(
 
       // Prefer launching into the active console session so display APIs (e.g., SetDisplayConfig)
       // have a better chance of working while Sunshine runs as a service.
-      if (start_as_system_in_active_console_session(cmd_line, working_dir, creation_flags, inherit_handles, si, pi_)) {
+      if (start_as_system_in_active_console_session(cmd_line, working_dir, creation_flags, inherit_handles, process_attributes_ptr, si, pi_)) {
         ret = TRUE;
       } else {
         ret = CreateProcessW(
           nullptr,
           (LPWSTR) cmd_line.c_str(),
-          nullptr,
-          nullptr,
+          process_attributes_ptr,
+          process_attributes_ptr,
           inherit_handles,
           creation_flags,
           nullptr,
@@ -376,8 +410,8 @@ bool ProcessHandler::start(
     ret = CreateProcessW(
       nullptr,
       (LPWSTR) cmd_line.c_str(),
-      nullptr,
-      nullptr,
+      process_attributes_ptr,
+      process_attributes_ptr,
       inherit_handles,
       creation_flags,
       nullptr,
