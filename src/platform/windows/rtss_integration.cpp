@@ -451,7 +451,7 @@ namespace platf {
       trust_data.dwProvFlags = WTD_REVOCATION_CHECK_NONE | WTD_DISABLE_MD2_MD4;
 
       GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-      const LONG trust_result = WinVerifyTrust(INVALID_HANDLE_VALUE, &action, &trust_data);
+      const LONG trust_result = WinVerifyTrust(reinterpret_cast<HWND>(INVALID_HANDLE_VALUE), &action, &trust_data);
       std::optional<signer_fingerprint_t> fingerprint;
       if (trust_result == ERROR_SUCCESS) {
         CRYPT_PROVIDER_DATA *provider = WTHelperProvDataFromStateData(trust_data.hWVTStateData);
@@ -472,7 +472,7 @@ namespace platf {
       }
 
       trust_data.dwStateAction = WTD_STATEACTION_CLOSE;
-      WinVerifyTrust(INVALID_HANDLE_VALUE, &action, &trust_data);
+      WinVerifyTrust(reinterpret_cast<HWND>(INVALID_HANDLE_VALUE), &action, &trust_data);
       return fingerprint;
     }
 
@@ -561,10 +561,10 @@ namespace platf {
       if (length == 0 || length >= module_path.size()) {
         return false;
       }
-      module_path.resize(length);
+      const std::wstring module_path_str(module_path.data(), length);
 
       HANDLE loaded_file = CreateFileW(
-        module_path.c_str(),
+        module_path_str.c_str(),
         FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,
