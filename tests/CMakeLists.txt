@@ -703,6 +703,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         LINK_LIBRARIES Boost::asio)
 endif()
 sunshine_register_component(NAME test_component_hdr_request_policy TEST_SOURCE unit/test_hdr_request_policy.cpp)
+sunshine_register_component(NAME test_component_hdr_dynamic_metadata TEST_SOURCE unit/test_hdr_dynamic_metadata.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/hdr_dynamic_metadata.cpp")
+if(WIN32)
+    # The statistics shader and its readback ring on the WARP software rasterizer.
+    sunshine_register_component(NAME test_component_hdr_stats_d3d11
+        TEST_SOURCE unit/platform/windows/test_hdr_stats_d3d11.cpp
+        PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/hdr_stats_d3d11.cpp"
+                        "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/hdr_dynamic_metadata.cpp"
+        LINK_LIBRARIES d3d11 d3dcompiler
+        DEFINITIONS "HDR_STATS_TEST_SHADER_PATH=L\"${SUNSHINE_TEST_REPOSITORY_ROOT}/src_assets/windows/assets/shaders/directx/hdr_stats_cs.hlsl\"")
+endif()
 sunshine_register_component(NAME test_component_single_flight TEST_SOURCE unit/test_single_flight.cpp)
 sunshine_register_component(NAME test_component_display_helper_request_policy TEST_SOURCE unit/test_display_helper_request_policy.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/display_helper_request_policy.cpp")
@@ -1333,6 +1344,15 @@ sunshine_register_component(NAME test_component_video_capture_source TEST_SOURCE
     LINK_LIBRARIES nlohmann_json::nlohmann_json)
 sunshine_register_component(NAME test_component_video_colorspace TEST_SOURCE unit/test_video_colorspace.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/video_colorspace.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/logging.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/logging_policy.cpp"
+    INCLUDE_DIRECTORIES ${FFMPEG_INCLUDE_DIRS}
+    LINK_LIBRARIES nlohmann_json::nlohmann_json Boost::log Boost::asio Boost::crc Boost::format Boost::process ZLIB::ZLIB ${FFMPEG_LIBRARIES}
+                   ${SUNSHINE_TEST_FFMPEG_PLATFORM_LIBRARIES} ${SUNSHINE_TEST_SOCKET_LIBRARIES})
+sunshine_register_component(NAME test_component_video_hdr_dynamic TEST_SOURCE unit/test_video_hdr_dynamic.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/video_hdr_dynamic.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/hdr_dynamic_metadata.cpp"
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/video_colorspace.cpp"
                     "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/logging.cpp"
                     "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/logging_policy.cpp"
     INCLUDE_DIRECTORIES ${FFMPEG_INCLUDE_DIRS}
