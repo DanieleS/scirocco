@@ -392,7 +392,6 @@ namespace video::hdr_dynamic {
 
   std::vector<std::uint8_t> hevc_t35_sei(std::span<const std::uint8_t> t35) {
     std::vector<std::uint8_t> rbsp;
-    rbsp.reserve(t35.size() + 8);
     push_ff_coded(sei_user_data_registered_itu_t_t35, rbsp);
     push_ff_coded(t35.size(), rbsp);
     rbsp.insert(rbsp.end(), t35.begin(), t35.end());
@@ -404,7 +403,6 @@ namespace video::hdr_dynamic {
 
   std::vector<std::uint8_t> av1_t35_obu(std::span<const std::uint8_t> t35) {
     std::vector<std::uint8_t> payload;
-    payload.reserve(t35.size() + 2);
     push_leb128(metadata_type_itut_t35, payload);
     payload.insert(payload.end(), t35.begin(), t35.end());
     payload.push_back(0x80);  // trailing_bits

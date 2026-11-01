@@ -412,6 +412,10 @@ struct amf_encode_session_t {
   std::array<pending_timestamp_slot_t, 256> pending_timestamps {};
 };
 
+// HDR10+ splicing is an independent delivery step with no effect on AMF scheduling.
+template<class Session, class Packet>
+void splice_hdr_dynamic_units(Session &, Packet &) {}
+
 #include "video_delivery.inc"
 
 void check(bool ok, const char *msg) {
