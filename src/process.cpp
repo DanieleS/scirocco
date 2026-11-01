@@ -4473,7 +4473,9 @@ namespace proc {
       if (const auto error = monitor_profile_changes_error(previous, fileTree, previous_file); !error.empty()) {
         throw std::invalid_argument(std::string {error});
       }
-      file_handler::write_file(fileName.c_str(), fileTree.dump(4));
+      if (file_handler::write_file(fileName.c_str(), fileTree.dump(4)) != 0) {
+        throw std::runtime_error("Failed to persist migrated application list");
+      }
     }
   }
 
@@ -4515,6 +4517,14 @@ namespace proc {
         tree = nlohmann::json::parse(content);
       } catch (const std::exception &e) {
         BOOST_LOG(warning) << "Couldn't read apps.json properly! Apps will not be loaded."sv;
+        break;
+      }
+
+      // Validate the original document before migration: legacy migration
+      // otherwise replaces a missing or non-array apps field with an empty
+      // array and may persist that destructive transformation.
+      if (!tree.is_object() || !tree.contains("apps") || !tree["apps"].is_array()) {
+        BOOST_LOG(warning) << "The apps.json document has no valid apps array."sv;
         break;
       }
 
@@ -4898,29 +4908,11 @@ namespace proc {
       break;
     } while (fail_count < 3);
 
-    if (fail_count > 0) {
-      BOOST_LOG(warning) << "No applications configured, adding fallback Desktop entry.";
-      proc::ctx_t ctx {};
-      ctx.idx = std::to_string(i);
-      ctx.uuid = FALLBACK_DESKTOP_UUID;  // Placeholder UUID
-      ctx.name = "Desktop (fallback)";
-      ctx.image_path = parse_env_val(this_env, "desktop-alt.png");
-      ctx.virtual_display = false;
-      ctx.scale_factor = 100;
-      ctx.use_app_identity = false;
-      ctx.per_client_app_identity = false;
-      ctx.allow_client_commands = false;
-      ctx.terminate_on_pause = false;
-
-      ctx.elevated = false;
-      ctx.auto_detach = true;
-      ctx.wait_all = false;  // Desktop doesn't have a specific command to wait for
-      ctx.exit_timeout = 5s;
-
-      // Calculate unique ID
-      assign_unique_generated_app_id(ctx, i++, ids, apps);
-
-      apps.emplace_back(std::move(ctx));
+    // Never replace the active catalog with built-in or partially parsed
+    // entries when reading, parsing, or migration failed. A valid empty apps
+    // array still succeeds and receives the normal built-in entries below.
+    if (!apps_parsed_ok) {
+      return std::nullopt;
     }
 
     // Virtual Display entry
