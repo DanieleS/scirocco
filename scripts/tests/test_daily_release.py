@@ -90,8 +90,10 @@ class DailyTests(unittest.TestCase):
     def test_launcher_dispatch_payload_and_failure(self):
         bash, jq = shutil.which('bash'), shutil.which('jq')
         if not bash or not jq: self.skipTest('Isolated launcher shell proof requires Bash and jq')
-        template = (Path(__file__).parent/'fixtures/daily-prerelease-launcher.yml').read_text()
-        script = textwrap.dedent(template.split('        run: |\n', 1)[1])
+        workflow = (Path(__file__).resolve().parents[2]/'.github/workflows/daily-prerelease.yml').read_text()
+        dispatch = re.search(r'\n  dispatch:\n(.*?)\n  prepare:', workflow, re.S)
+        self.assertIsNotNone(dispatch, 'production workflow must define the dispatch job before prepare')
+        script = textwrap.dedent(dispatch.group(1).split('        run: |\n', 1)[1])
         fake = r'''gh() {
   test "$1" = api && test "$2" = --method && test "$3" = POST || return 90
   test "$4" = repos/Nonary/Vibepollo/actions/workflows/daily-prerelease.yml/dispatches || return 91
