@@ -17,6 +17,10 @@ migrate_start = source.index('  void migrate_apps(')
 migrate_end = source.index('  std::optional<proc::proc_t> parse(', migrate_start)
 load_start = source.index('    bool apps_parsed_ok = false;', migrate_end)
 load_end = source.index('    // Virtual Display entry', load_start)
+persist_start = source.index('    // Persist only the fully parsed staged migration.', load_end)
+builtins = source[load_end:persist_start]
+persist_end = source.index('    // Only reconcile the persisted alias map', persist_start)
+persist = source[persist_start:persist_end]
 loop = source[load_start:load_end]
 app_start = loop.index('        for (auto &app_node : tree["apps"]) {')
 app_end = loop.index('        fail_count = 0;', app_start)
@@ -33,4 +37,4 @@ loop = loop[:app_start] + '''        // App field conversion is a deterministic 
 ''' + loop[app_end:]
 template = Path(__file__).with_suffix('.cpp.in').read_text()
 args.output.parent.mkdir(parents=True, exist_ok=True)
-args.output.write_text(template.replace('@MIGRATION@', source[migrate_start:migrate_end]).replace('@LOAD_LOOP@', loop))
+args.output.write_text(template.replace('@MIGRATION@', source[migrate_start:migrate_end]).replace('@LOAD_LOOP@', loop).replace('@BUILTIN@', builtins).replace('@PERSIST@', persist))

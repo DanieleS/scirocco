@@ -20,12 +20,14 @@ namespace bp = boost_process_shim;
 #define CHECK(condition) do { if (!(condition)) { std::cerr << "check failed: " #condition << "\n"; std::abort(); } } while (false)
 namespace file_handler {
   bool fail_write = false;
+  int write_attempts = 0;
   std::string read_file(const char *path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) throw std::runtime_error("cannot read app file");
     return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
   }
   int write_file(const char *path, const std::string &contents) {
+    ++write_attempts;
     if (fail_write) return -1;
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out || !(out << contents)) throw std::runtime_error("cannot write app file");
@@ -41,7 +43,15 @@ namespace uuid_util {
 namespace remote_session {
   std::string_view monitor_profile_json_error(const nlohmann::json &, const nlohmann::json &) { return {}; }
 }
+namespace config { input_t input {}; }
+namespace util { int from_view(std::string_view value) { return std::stoi(std::string(value)); } }
 namespace proc {
+  constexpr auto REMOTE_INPUT_UUID = "input-only";
+  constexpr auto TERMINATE_APP_UUID = "terminate";
+  int input_only_app_id = 123;
+  std::string input_only_app_id_str = "123";
+  int terminate_app_id = 456;
+  std::string terminate_app_id_str = "456";
   std::string_view configured_monitor_profile_error(const nlohmann::json &, const nlohmann::json &) { return {}; }
   std::string_view monitor_profile_changes_error(const nlohmann::json &, const nlohmann::json &, const std::string &) { return {}; }
   constexpr auto FALLBACK_DESKTOP_UUID = "fallback-desktop";
@@ -55,11 +65,14 @@ namespace proc {
     auto this_env = bp::this_process::env();
     std::set<std::string> ids;
     std::vector<ctx_t> apps;
+    std::map<std::string, std::string> app_id_alias_state;
+    std::set<std::string> active_app_uuids;
+    bool app_id_alias_state_changed = false;
     int i = 0;
 @LOAD_LOOP@
-    // The production guard above must be reached before any built-in entries.
-    ctx_t builtin {}; builtin.uuid = "built-in"; builtin.id = "999"; builtin.name = "Terminate";
-    apps.emplace_back(std::move(builtin));
+    // Actual built-in construction and generated-ID publication are included.
+@BUILTIN@
+@PERSIST@
     return catalog::snapshot_t {std::move(this_env), std::move(apps)};
   }
 }
@@ -92,7 +105,7 @@ namespace {
   }
 }
 int main(int argc, char **argv) {
-  CHECK(argc == 2); const std::filesystem::path root = argv[1]; std::filesystem::create_directories(root);
+  CHECK(argc == 2); config::input.enable_input_only_mode = true; const std::filesystem::path root = argv[1]; std::filesystem::create_directories(root);
   const auto file = root / "apps.json";
   fixture_t f; f.seed();
   for (const std::string invalid : {R"({"version":1})", R"({"version":1,"apps":{}})", R"({"version":1,"apps":null})"}) {
@@ -103,8 +116,12 @@ int main(int argc, char **argv) {
   write(file, "{broken"); f.refresh(file); retained(f);
   write(file, R"({"version":2,"apps":{}})"); f.refresh(file); retained(f);
   // First app parses, second fails; no built-in or partial catalog may publish.
-  write(file, R"({"version":2,"env":{"CATALOG_MARKER":"new-value"},"apps":[{"uuid":"ok","name":"First"},{"uuid":"bad","name":5}]})");
+  const std::string partial = R"({"version":2,"env":{"CATALOG_MARKER":"new-value"},"apps":[{"uuid":"ok","name":"First","elevated":"yes"},{"uuid":"bad","name":5}]})";
+  write(file, partial);
+  const auto writes_before_partial = file_handler::write_attempts;
   f.refresh(file); retained(f);
+  CHECK(file_handler::read_file(file.string().c_str()) == partial);
+  CHECK(file_handler::write_attempts == writes_before_partial);
   // Recovery migration itself fails on an invalid legacy numeric field.
   write(file, R"({"version":1,"apps":[{"name":"Invalid","scale-factor":"not-a-number"}]})");
   f.refresh(file); retained(f);
@@ -112,17 +129,32 @@ int main(int argc, char **argv) {
   const std::string legacy = R"({"version":1,"apps":[{"name":"Migrated","elevated":"true"}]})";
   write(file, legacy); file_handler::fail_write = true; f.refresh(file); file_handler::fail_write = false;
   retained(f); CHECK(file_handler::read_file(file.string().c_str()) == legacy);
+  CHECK(proc::input_only_app_id == 123 && proc::input_only_app_id_str == "123");
+  CHECK(proc::terminate_app_id == 456 && proc::terminate_app_id_str == "456");
   // Actual v1-to-v2 migration writes a UUID and converts a legacy boolean.
   write(file, R"({"version":1,"env":{"CATALOG_MARKER":"new-value"},"apps":[{"name":"Migrated","elevated":"true"}]})");
-  f.refresh(file); CHECK(f.replacements == 1 && f.apps.size() == 2 && f.apps[0].name == "Migrated" && f.apps[1].uuid == "built-in");
+  f.refresh(file); CHECK(f.replacements == 1 && f.apps.size() == 3 && f.apps[0].name == "Migrated" && f.apps[1].uuid == proc::REMOTE_INPUT_UUID && f.apps[2].uuid == proc::TERMINATE_APP_UUID);
   bool saw_new_env = false;
   for (const auto &entry : f.env) if (entry.get_name() == "CATALOG_MARKER") saw_new_env = entry.to_string() == "new-value";
   CHECK(saw_new_env);
   const auto migrated = nlohmann::json::parse(file_handler::read_file(file.string().c_str()));
   CHECK(migrated.at("version") == 2 && migrated.at("apps").at(0).at("elevated") == true && migrated.at("apps").at(0).contains("uuid"));
+  // A v2 document with a missing UUID needs a recovery migration after an
+  // earlier app was parsed. Publish only the complete retry and write once.
+  write(file, R"({"version":2,"env":{"CATALOG_MARKER":"retry-value"},"apps":[{"uuid":"kept","name":"First"},{"name":"Retry","elevated":"yes"}]})");
+  const auto writes_before_retry = file_handler::write_attempts;
+  f.refresh(file);
+  CHECK(f.replacements == 2 && f.apps.size() == 4);
+  CHECK(f.apps[0].uuid == "kept" && f.apps[1].name == "Retry" && f.apps[2].uuid == proc::REMOTE_INPUT_UUID && f.apps[3].uuid == proc::TERMINATE_APP_UUID);
+  CHECK(file_handler::write_attempts == writes_before_retry + 1);
+  const auto recovered = nlohmann::json::parse(file_handler::read_file(file.string().c_str()));
+  CHECK(recovered.at("apps").at(1).at("elevated") == true && recovered.at("apps").at(1).contains("uuid"));
+  bool saw_retry_env = false;
+  for (const auto &entry : f.env) if (entry.get_name() == "CATALOG_MARKER") saw_retry_env = entry.to_string() == "retry-value";
+  CHECK(saw_retry_env);
   // Empty-but-valid files publish built-ins, including on first start.
   write(file, R"({"version":2,"apps":[]})");
-  fixture_t fresh; fresh.refresh(file); CHECK(fresh.replacements == 1 && fresh.apps.size() == 1 && fresh.apps[0].uuid == "built-in");
+  fixture_t fresh; fresh.refresh(file); CHECK(fresh.replacements == 1 && fresh.apps.size() == 2 && fresh.apps[0].uuid == proc::REMOTE_INPUT_UUID && fresh.apps[1].uuid == proc::TERMINATE_APP_UUID);
   fixture_t failed_first; failed_first.refresh(root / "missing.json"); CHECK(failed_first.replacements == 0 && failed_first.apps.empty());
   std::cout << "catalog load failure and migration integration: passed\n";
 }

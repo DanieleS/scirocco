@@ -4458,7 +4458,7 @@ namespace proc {
     }
   }
 
-  void migrate(nlohmann::json &fileTree, const std::string &fileName) {
+  void migrate(nlohmann::json &fileTree, const std::string &fileName, bool persist = true, bool *migrated = nullptr) {
     int last_version = 2;
 
     int file_version = 0;
@@ -4473,8 +4473,11 @@ namespace proc {
       if (const auto error = monitor_profile_changes_error(previous, fileTree, previous_file); !error.empty()) {
         throw std::invalid_argument(std::string {error});
       }
-      if (file_handler::write_file(fileName.c_str(), fileTree.dump(4)) != 0) {
+      if (persist && file_handler::write_file(fileName.c_str(), fileTree.dump(4)) != 0) {
         throw std::runtime_error("Failed to persist migrated application list");
+      }
+      if (migrated) {
+        *migrated = true;
       }
     }
   }
@@ -4508,28 +4511,31 @@ namespace proc {
     int i = 0;
 
     bool apps_parsed_ok = false;
+    bool migration_pending = false;
     size_t fail_count = 0;
+    const auto initial_env = this_env;
+    const auto initial_alias_state = app_id_alias_state;
+    nlohmann::json tree;
+    try {
+      const auto content = file_handler::read_file(file_name.c_str());
+      tree = nlohmann::json::parse(content);
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "Couldn't read apps.json properly! Apps will not be loaded."sv;
+      return std::nullopt;
+    }
+
+    // Validate the original document before migration: legacy migration
+    // otherwise replaces a missing or non-array apps field with an empty array.
+    if (!tree.is_object() || !tree.contains("apps") || !tree["apps"].is_array()) {
+      BOOST_LOG(warning) << "The apps.json document has no valid apps array."sv;
+      return std::nullopt;
+    }
+
     do {
-      // Read the JSON file into a tree.
-      nlohmann::json tree;
       try {
-        std::string content = file_handler::read_file(file_name.c_str());
-        tree = nlohmann::json::parse(content);
-      } catch (const std::exception &e) {
-        BOOST_LOG(warning) << "Couldn't read apps.json properly! Apps will not be loaded."sv;
-        break;
-      }
-
-      // Validate the original document before migration: legacy migration
-      // otherwise replaces a missing or non-array apps field with an empty
-      // array and may persist that destructive transformation.
-      if (!tree.is_object() || !tree.contains("apps") || !tree["apps"].is_array()) {
-        BOOST_LOG(warning) << "The apps.json document has no valid apps array."sv;
-        break;
-      }
-
-      try {
-        migrate(tree, file_name);
+        // Stage migration only. The file is written after every app has been
+        // parsed, so a failed retry cannot commit a partial conversion.
+        migrate(tree, file_name, false, &migration_pending);
 
         if (tree.contains("env") && tree["env"].is_object()) {
           for (auto &item : tree["env"].items()) {
@@ -4887,19 +4893,15 @@ namespace proc {
 
         BOOST_LOG(warning) << "App format is still invalid! Trying to re-migrate the app list..."sv;
 
-        // Always try migrating from scratch when error happened
+        // Retry the staged tree without modifying the source file. Clear all
+        // partial catalog and alias state before parsing the next attempt.
         tree["version"] = 0;
-
-        try {
-          migrate(tree, file_name);
-        } catch (std::exception &e) {
-          BOOST_LOG(error) << "Error happened during migration: "sv << e.what();
-          break;
-        }
-
-        this_env = bp::this_process::env();
+        this_env = initial_env;
         ids.clear();
         apps.clear();
+        app_id_alias_state = initial_alias_state;
+        active_app_uuids.clear();
+        app_id_alias_state_changed = false;
         i = 0;
 
         continue;
@@ -4914,6 +4916,10 @@ namespace proc {
     if (!apps_parsed_ok) {
       return std::nullopt;
     }
+
+    // Generated IDs become visible only after the staged file is persisted.
+    std::optional<std::string> staged_input_only_id;
+    std::string staged_terminate_id;
 
     // Virtual Display entry
 #ifdef _WIN32
@@ -4951,8 +4957,7 @@ namespace proc {
 
         assign_unique_generated_app_id(ctx, i++, ids, apps);
 
-        input_only_app_id_str = ctx.id;
-        input_only_app_id = util::from_view(ctx.id);
+        staged_input_only_id = ctx.id;
 
         apps.emplace_back(std::move(ctx));
       }
@@ -4979,11 +4984,30 @@ namespace proc {
 
       assign_unique_generated_app_id(ctx, i++, ids, apps);
 
-      terminate_app_id_str = ctx.id;
-      terminate_app_id = util::from_view(ctx.id);
+      staged_terminate_id = ctx.id;
 
       apps.emplace_back(std::move(ctx));
     }
+
+    // Persist only the fully parsed staged migration. The caller holds the
+    // apps-file lock, and a failed write must not publish the new catalog.
+    if (migration_pending) {
+      try {
+        if (file_handler::write_file(file_name.c_str(), tree.dump(4)) != 0) {
+          throw std::runtime_error("Failed to persist migrated application list");
+        }
+      } catch (const std::exception &e) {
+        BOOST_LOG(error) << "Could not persist migrated apps.json: "sv << e.what();
+        return std::nullopt;
+      }
+    }
+
+    if (staged_input_only_id) {
+      input_only_app_id_str = *staged_input_only_id;
+      input_only_app_id = util::from_view(*staged_input_only_id);
+    }
+    terminate_app_id_str = staged_terminate_id;
+    terminate_app_id = util::from_view(staged_terminate_id);
 
     // Only reconcile the persisted alias map when apps.json actually parsed. A failed or partial
     // parse leaves active_app_uuids empty or incomplete, so pruning here would erase the aliases of
