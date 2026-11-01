@@ -738,6 +738,7 @@ jobs:
           echo "::remove-matcher owner=gcc::"
 
       - name: Test native AMF lifecycle behavior
+        if: inputs.build_tests
         shell: msys2 {0}
         run: |
           set -euo pipefail
