@@ -369,6 +369,7 @@ list(PREPEND PLATFORM_LIBRARIES
         synchronization.lib
         Windowscodecs
         userenv
+        wintrust
         user32
         secur32
         wtsapi32
