@@ -54,6 +54,7 @@ extern "C" {
 #include "video.h"
 #include "video_framerate_policy.h"
 #include "video_encoder_probe_policy.h"
+#include "video_hdr_dynamic.h"
 #include "video_fec.h"
 #include "video_policy.h"
 #include "webrtc_stream.h"
@@ -1231,6 +1232,11 @@ namespace video {
         clm->MaxCLL = metadata.maxContentLightLevel;
         clm->MaxFALL = metadata.maxFrameAverageLightLevel;
       }
+      set_hdr_dynamic_static_levels(*this, metadata);
+    }
+
+    platf::encode_device_t *encode_device() override {
+      return device.get();
     }
 
     void restore_display_lease_after_initialization(std::shared_ptr<platf::display_t> display) {
@@ -1314,6 +1320,11 @@ namespace video {
       device->hdr_metadata = metadata;
       device->hdr_metadata_valid = true;
       device->nvenc->set_hdr_metadata(metadata);
+      set_hdr_dynamic_static_levels(*this, metadata);
+    }
+
+    platf::encode_device_t *encode_device() override {
+      return device.get();
     }
 
     nvenc::nvenc_encoded_frame encode_frame(uint64_t frame_index) {
@@ -1427,6 +1438,11 @@ namespace video {
       if (!device->amf->set_hdr_metadata(std::optional<amf::amf_hdr_metadata> {amf_metadata})) {
         BOOST_LOG(warning) << "AMF: failed to update live HDR mastering metadata; the bitstream keeps the previous values"sv;
       }
+      set_hdr_dynamic_static_levels(*this, metadata);
+    }
+
+    platf::encode_device_t *encode_device() override {
+      return device.get();
     }
 
     bool has_fresh_conversion() const {
@@ -3672,6 +3688,28 @@ namespace video {
     }
   }
 
+  /**
+   * @brief Give `session` HDR10+ dynamic metadata when the setting asks for it; see
+   *        attach_hdr_dynamic_stream().
+   */
+  static void attach_hdr_dynamic_metadata(encode_session_t &session, const encoder_t &encoder, const config_t &config) {
+    if (!config::video.hdr_dynamic_metadata) {
+      return;
+    }
+
+    auto *device = session.encode_device();
+    const auto colorspace = device ? device->colorspace : colorspace_from_client_config(config, config.dynamicRange > 0);
+    const bool software_encoder = dynamic_cast<avcodec_software_encode_device_t *>(device) != nullptr;
+    attach_hdr_dynamic_stream(
+      session,
+      true,
+      config.videoFormat,
+      colorspace,
+      software_encoder ? hdr_dynamic::encoder_e::software : hdr_dynamic::encoder_e::hardware,
+      encoder.name
+    );
+  }
+
   int encode_avcodec(
     int64_t frame_nr,
     avcodec_encode_session_t &session,
@@ -3750,6 +3788,7 @@ namespace video {
 
       packet->replacements = &session.replacements;
       packet->channel_data = channel_data;
+      splice_hdr_dynamic_units(session, *packet);
       if (webrtc_stream::has_active_sessions()) {
         webrtc_stream::submit_video_packet(*packet);
       }
@@ -3781,6 +3820,7 @@ namespace video {
     packet->frame_timestamp = frame_timestamp;
     packet->capture_timestamp = capture_timestamp ? capture_timestamp : frame_timestamp;
     packet->host_processing_timestamp = host_processing_timestamp;
+    splice_hdr_dynamic_units(session, *packet);
     if (webrtc_stream::has_active_sessions()) {
       webrtc_stream::submit_video_packet(*packet);
     }
@@ -3819,6 +3859,7 @@ namespace video {
       packet->frame_timestamp = ts.frame_timestamp;
       packet->capture_timestamp = ts.capture_timestamp ? ts.capture_timestamp : ts.frame_timestamp;
       packet->host_processing_timestamp = ts.host_processing_timestamp;
+      splice_hdr_dynamic_units(session, *packet);
       if (webrtc_stream::has_active_sessions()) {
         webrtc_stream::submit_video_packet(*packet);
       }
@@ -3890,6 +3931,10 @@ namespace video {
     }
 
     encode_duration_logger.collect_and_log(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - encode_start).count());
+    if (result == 0) {
+      // The encoder has this frame; its statistics pass is named after it now, and never waited for.
+      run_hdr_dynamic_pass(session, frame_nr);
+    }
     return result;
   }
 
@@ -5169,6 +5214,7 @@ namespace video {
       if (initialization_gate_contended) return encode_run_result_e::temporarily_busy;
       return encode_run_result_e::initialization_failed;
     }
+    attach_hdr_dynamic_metadata(*session, *session_encoder, config);
     // One RTTI lookup for the whole session — the pointer stays valid until the
     // fail_guard teardown moves the session out after the encode loop exits.
     auto *const native_session = dynamic_cast<amf_encode_session_t *>(session.get());
@@ -6063,6 +6109,7 @@ namespace video {
     if (!session) {
       return std::nullopt;
     }
+    attach_hdr_dynamic_metadata(*session, encoder, ctx.config);
 
     // Load the initial image to prepare for encoding
     if (session->convert(img)) {
@@ -6533,6 +6580,11 @@ namespace video {
     hdr_info_t pending_hdr_info,
     std::optional<hdr_info_raw_t> &last_hdr_info
   ) {
+    if (hdr_dynamic::gate(config::video.hdr_dynamic_metadata, config.videoFormat, colorspace_is_hdr(colorspace), colorspace.bit_depth, hdr_dynamic::encoder_e::pyrowave) == hdr_dynamic::gate_e::unsupported) {
+      static std::atomic_bool warned = false;
+      warn_hdr_dynamic_unsupported(warned, "pyrowave"sv);
+    }
+
     pyrowave::host::session_params_t params;
     params.width = config.width;
     params.height = config.height;

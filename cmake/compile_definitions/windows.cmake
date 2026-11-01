@@ -263,6 +263,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/rtx_hdr_runtime.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_ram.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_vram.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/hdr_stats_d3d11.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/hdr_stats_d3d11.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_wgc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/present_timing.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/present_timing.cpp"
