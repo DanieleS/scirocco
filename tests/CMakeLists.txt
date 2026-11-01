@@ -417,6 +417,27 @@ sunshine_add_test_target(
 
 if(SUNSHINE_TEST_ENABLE_COMPONENT)
     find_package(Threads REQUIRED)
+    if(SUNSHINE_TEST_PYTHON_EXECUTABLE)
+        set(_pairing_transaction_fixture "${CMAKE_CURRENT_BINARY_DIR}/pairing-transaction/test.cpp")
+        add_custom_command(
+            OUTPUT "${_pairing_transaction_fixture}"
+            COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
+                "${CMAKE_CURRENT_LIST_DIR}/unit/test_pairing_transaction.py"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}" --generate-only --output "${_pairing_transaction_fixture}"
+            DEPENDS
+                "${CMAKE_CURRENT_LIST_DIR}/unit/test_pairing_transaction.py"
+                "${CMAKE_CURRENT_LIST_DIR}/unit/test_pairing_transaction.cpp.in"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/nvhttp.cpp"
+            VERBATIM)
+        sunshine_add_test_target(
+            NAME test_component_pairing_transaction
+            CATEGORY component
+            TEST_SOURCES "${CMAKE_CURRENT_LIST_DIR}/tests_main.cpp" "${_pairing_transaction_fixture}"
+            PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/http_pairing_policy.cpp"
+            LINK_LIBRARIES GTest::gtest Threads::Threads
+        )
+        set_tests_properties(test_component_pairing_transaction PROPERTIES TIMEOUT 30)
+    endif()
     sunshine_add_test_target(
         NAME test_component_broadcast_runtime
         CATEGORY component
