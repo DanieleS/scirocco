@@ -2641,6 +2641,9 @@ namespace VibepolloInstaller {
           || string.Equals(fullPath, pathRoot, StringComparison.OrdinalIgnoreCase)) {
         throw new InvalidOperationException("A filesystem root cannot be used as the Vibepollo install folder.");
       }
+      if (fullPath.IndexOfAny(new[] { '"', '\'', '`', '$', '%', ';', '&', '|', '<', '>', '^', '\r', '\n', '/' }) >= 0) {
+        throw new InvalidOperationException("The install folder contains unsupported command characters.");
+      }
       var programFilesRoots = new[] {
         Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
         Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
@@ -2667,10 +2670,8 @@ namespace VibepolloInstaller {
               "The install folder or one of its parent folders is a reparse point. "
               + "Choose a direct local path so the installer can secure it safely.");
           }
-          if (programFilesRoots.Any(root =>
-              string.Equals(current, root, StringComparison.OrdinalIgnoreCase) || PathIsUnderDirectory(current, root))) {
-            RejectUntrustedWritableInstallAncestor(info);
-          }
+          // The package's native guard owns ACL classification. A second
+          // managed policy must not turn its compatibility warnings into errors.
         }
         var parent = Path.GetDirectoryName(current);
         if (string.IsNullOrWhiteSpace(parent)
@@ -2700,49 +2701,6 @@ namespace VibepolloInstaller {
           + "Choose a new empty folder so unrelated files are never modified.");
       }
       return fullPath;
-    }
-
-    private static void RejectUntrustedWritableInstallAncestor(DirectoryInfo directory) {
-      var security = directory.GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
-      var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
-      if (owner != null && !IsTrustedInstallRootPrincipal(owner)) {
-        throw new InvalidOperationException(
-          "The install folder or one of its parent folders is owned by an untrusted account: " + directory.FullName);
-      }
-
-      // Use only primitive mutation bits. Composite Write/Modify/FullControl
-      // include read/synchronize bits, so testing them by overlap rejects a
-      // normal Users RX ACE.
-      const FileSystemRights unsafeRights = FileSystemRights.WriteData
-        | FileSystemRights.AppendData
-        | FileSystemRights.WriteExtendedAttributes
-        | FileSystemRights.WriteAttributes
-        | FileSystemRights.Delete
-        | FileSystemRights.DeleteSubdirectoriesAndFiles
-        | FileSystemRights.ChangePermissions
-        | FileSystemRights.TakeOwnership;
-      foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier))) {
-        var sid = rule.IdentityReference as SecurityIdentifier;
-        if (rule.AccessControlType == AccessControlType.Allow
-            && (rule.FileSystemRights & unsafeRights) != 0
-            && sid != null
-            && !IsTrustedInstallRootPrincipal(sid)) {
-          throw new InvalidOperationException(
-            "The install folder or one of its parent folders grants write access to an untrusted account: "
-            + directory.FullName);
-        }
-      }
-    }
-
-    private static bool IsTrustedInstallRootPrincipal(SecurityIdentifier sid) {
-      if (sid == null) return false;
-      return sid.IsWellKnown(WellKnownSidType.LocalSystemSid)
-        || sid.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid)
-        || sid.IsWellKnown(WellKnownSidType.CreatorOwnerSid)
-        || string.Equals(
-          sid.Value,
-          "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
-          StringComparison.Ordinal);
     }
 
     private static bool IsRegisteredInstallRoot(string installRoot) {
@@ -3731,6 +3689,15 @@ namespace VibepolloInstaller {
     [DllImport("msi.dll", CharSet = CharSet.Unicode)]
     private static extern int MsiQueryProductState(string szProduct);
 
+    [DllImport("msi.dll", CharSet = CharSet.Unicode)]
+    private static extern uint MsiSetProperty(IntPtr hInstall, string name, string value);
+
+    [DllImport("msi.dll", CharSet = CharSet.Unicode)]
+    private static extern uint MsiDoAction(IntPtr hInstall, string action);
+
+    [DllImport("msi.dll")]
+    private static extern uint MsiSetInternalUI(uint level, IntPtr window);
+
     [DllImport("msi.dll")]
     private static extern uint MsiCloseHandle(IntPtr hAny);
 
@@ -3805,6 +3772,61 @@ namespace VibepolloInstaller {
       }
     }
 
+    // Run only costing and the incoming package's read-only native guard.
+    // Never execute INSTALL or a sequence here: the working host must remain
+    // intact until its replacement has accepted the destination and old roots.
+    private static InstallerResult PreflightIncomingMsi(string msiPath, string installDirectory, string logPhase) {
+      var logPath = BuildLogPath(logPhase);
+      IntPtr package = IntPtr.Zero;
+      uint previousUiLevel = 0;
+      try {
+        ValidateMsiPayloadImmediatelyBeforeExecution(new[] { "/i", msiPath });
+        // Preflight reports through InstallerResult; never leave a hidden MSI
+        // error dialog waiting for input behind the bootstrapper.
+        previousUiLevel = MsiSetInternalUI(2, IntPtr.Zero); // INSTALLUILEVEL_NONE
+        // IGNOREMACHINESTATE prohibits DLL custom actions and would silently
+        // make this preflight unusable. Use an ordinary, state-aware session.
+        var code = MsiOpenPackageEx(msiPath, 0, out package);
+        if (code != MsiErrorSuccess || package == IntPtr.Zero)
+          throw new InvalidOperationException("Opening the incoming MSI failed (Windows Installer " + code + ").");
+        if (!string.IsNullOrWhiteSpace(installDirectory)) {
+          code = MsiSetProperty(package, "INSTALL_ROOT", installDirectory);
+          if (code != MsiErrorSuccess)
+            throw new InvalidOperationException("Setting the install folder failed (Windows Installer " + code + ").");
+        }
+        // Include competing roots even though the later install skips their
+        // removal after our bootstrapper has handled it. Clear uninstall mode.
+        foreach (var property in new[] { "REMOVE", "SKIP_REMOVE_CONFLICTING_PRODUCTS", "SUPPRESSMSGBOXES" }) {
+          code = MsiSetProperty(package, property, property == "REMOVE" ? "" : property == "SUPPRESSMSGBOXES" ? "1" : "0");
+          if (code != MsiErrorSuccess)
+            throw new InvalidOperationException("Setting preflight policy failed (Windows Installer " + code + ").");
+        }
+        foreach (var action in new[] { "CostInitialize", "FileCost", "CostFinalize", "ValidateInstallRootPreview" }) {
+          code = MsiDoAction(package, action);
+          AppendInstallerLogMessage(logPath, "Incoming MSI preflight: " + action + " returned " + code + ".");
+          if (code != MsiErrorSuccess) {
+            var detail = ReadMsiProperty(package, "VIBESHINE_INSTALL_ROOT_ERROR");
+            throw new InvalidOperationException(action + " failed (Windows Installer " + code + "). " + detail);
+          }
+        }
+        var warnings = (ReadMsiProperty(package, "VIBESHINE_INSTALL_ROOT_WARNINGS") ?? "")
+          .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Distinct().ToList();
+        foreach (var warning in warnings) AppendInstallerLogMessage(logPath, "INSTALL_ROOT_WARNING: " + warning);
+        return new InstallerResult { Operation = InstallerOperation.Install, ExitCode = 0, LogPath = logPath, ComponentFailures = warnings };
+      } catch (Exception ex) {
+        AppendInstallerLogMessage(logPath, "Replacement stopped before uninstall: " + ex.Message);
+        return new InstallerResult {
+          Operation = InstallerOperation.Install,
+          ExitCode = 1603,
+          LogPath = logPath,
+          Message = "The replacement installer could not validate the install folders. The existing installation has not been removed. " + ex.Message
+        };
+      } finally {
+        if (package != IntPtr.Zero) MsiCloseHandle(package);
+        if (previousUiLevel != 0) MsiSetInternalUI(previousUiLevel, IntPtr.Zero);
+      }
+    }
+
     public static InstallerResult RunInteractiveInstall(
       InstallerArguments arguments,
       string installDirectory,
@@ -3826,10 +3848,11 @@ namespace VibepolloInstaller {
       try {
         installDirectory = ValidateInstallRootPath(installDirectory);
       } catch (Exception ex) {
+        var validationLog = BuildLogPath("install_path_validation");
+        var detail = "The install folder is not safe to use: " + ex.Message + " Path: " + installDirectory;
+        AppendInstallerLogMessage(validationLog, detail);
         return new InstallerResult {
-          Operation = InstallerOperation.Install,
-          ExitCode = 1603,
-          Message = "The install folder is not safe to use: " + ex.Message
+          Operation = InstallerOperation.Install, ExitCode = 1603, LogPath = validationLog, Message = detail
         };
       }
 
@@ -3845,6 +3868,9 @@ namespace VibepolloInstaller {
           Message = "The installer could not resolve a valid MSI payload: " + ex.Message
         };
       }
+      var preflight = PreflightIncomingMsi(msiPath, installDirectory, "install_preflight");
+      if (!preflight.Succeeded) return preflight;
+
       var recoveryDetails = new List<string>();
       StashedVibeshinePayload stashedPreviousPayload = null;
       StashedVibeshinePayload competingSourceStash;
@@ -4032,6 +4058,7 @@ namespace VibepolloInstaller {
         }
       }
 
+      ApplyPreflightWarnings(installResult, preflight);
       AppendRecoveryDetails(installResult, recoveryDetails);
       return ApplyStashedPayloadRecovery(installResult, stashedPreviousPayload, "install_restore_previous");
     }
@@ -6413,11 +6440,26 @@ namespace VibepolloInstaller {
       }
       string installRootFailure;
       if (isInstallOperation && !TryNormalizeAndValidateCliInstallRoot(cliArgs, out installRootFailure)) {
+        var validationLog = BuildLogPath("cli_path_validation");
+        installRootFailure += " Path: " + GetPropertyValue(cliArgs, "INSTALL_ROOT");
+        AppendInstallerLogMessage(validationLog, installRootFailure);
         return new InstallerResult {
-          Operation = InstallerOperation.Install,
-          ExitCode = 1603,
-          Message = installRootFailure
+          Operation = InstallerOperation.Install, ExitCode = 1603, LogPath = validationLog, Message = installRootFailure
         };
+      }
+      InstallerResult preflight = null;
+      if (isInstallOperation) {
+        // MSI transforms/patches can change the directory or guard after a
+        // plain-package preview. Do not remove a working host on that basis.
+        if (HasProperty(cliArgs, "TRANSFORMS") || HasProperty(cliArgs, "PATCH")) {
+          return new InstallerResult {
+            Operation = InstallerOperation.Install, ExitCode = 1603,
+            Message = "Bootstrapper replacement with MSI transforms or patches is not supported. The existing installation has not been removed."
+          };
+        }
+        preflight = PreflightIncomingMsi(GetMsiPathArgument(cliArgs),
+          GetPropertyValue(cliArgs, "INSTALL_ROOT"), "cli_preflight");
+        if (!preflight.Succeeded) return preflight;
       }
       var cliUninstallRecoveryProduct = isUninstallOperation
         ? TryResolveCliMsiUninstallRecoveryProduct(cliArgs)
@@ -6756,6 +6798,7 @@ namespace VibepolloInstaller {
           cliResult.Message += " Component warnings: " + string.Join(" ", componentWarnings);
         }
       }
+      ApplyPreflightWarnings(cliResult, preflight);
       AppendRecoveryDetails(cliResult, recoveryDetails);
       return ApplyStashedPayloadRecovery(cliResult, stashedPreviousPayload, "cli_restore_previous");
     }
@@ -7039,6 +7082,17 @@ namespace VibepolloInstaller {
       } catch {
         return false;
       }
+    }
+
+    private static void ApplyPreflightWarnings(InstallerResult result, InstallerResult preflight) {
+      if (result == null || preflight == null || preflight.ComponentFailures == null) return;
+      if (result.ComponentFailures == null) result.ComponentFailures = new List<string>();
+      foreach (var warning in preflight.ComponentFailures) {
+        if (!result.ComponentFailures.Contains(warning)) result.ComponentFailures.Add(warning);
+        AppendInstallerLogMessage(result.LogPath, "INSTALL_ROOT_WARNING: " + warning);
+      }
+      if (preflight.ComponentFailures.Count > 0)
+        result.Message += " Install-folder warnings: " + string.Join(" ", preflight.ComponentFailures);
     }
 
     private static void PreserveCliInstallDirectory(List<string> cliArgs) {
@@ -8766,6 +8820,14 @@ namespace VibepolloInstaller {
 
       try {
         var lines = File.ReadAllLines(installLogPath);
+        foreach (var line in lines) {
+          const string marker = "INSTALL_ROOT_WARNING: ";
+          var index = line.IndexOf(marker, StringComparison.Ordinal);
+          if (index >= 0) {
+            var warning = line.Substring(index + marker.Length).Trim();
+            if (!failures.Contains(warning)) failures.Add(warning);
+          }
+        }
         foreach (var displayAction in new[] { "InstallVirtualDisplayDriver", "InstallSudovda" }) {
           var displayLines = GetDisplayDriverLogLines(lines, displayAction, installVirtualDisplayDriver);
           var virtualDisplayDriverFailed = displayLines.Any(line =>
@@ -9467,8 +9529,18 @@ namespace VibepolloInstaller {
       }
 
       var message = operationName + " failed (error " + exitCode + ").";
-      if (exitCode == 1603) {
-        message += " A fatal error occurred during installation. Ensure no Vibepollo processes are running and try again.";
+      string guardError = null;
+      try {
+        if (!string.IsNullOrWhiteSpace(logPath) && File.Exists(logPath)) {
+          const string marker = "INSTALL_ROOT_ERROR: ";
+          var line = File.ReadLines(logPath).LastOrDefault(value => value.Contains(marker));
+          if (line != null) guardError = line.Substring(line.IndexOf(marker, StringComparison.Ordinal) + marker.Length).Trim();
+        }
+      } catch { }
+      if (!string.IsNullOrWhiteSpace(guardError)) {
+        message += " " + guardError;
+      } else if (exitCode == 1603) {
+        message += " Windows Installer reported a fatal error. Use Save logs to retain the failed action and error details.";
       } else if (exitCode == 1618) {
         message += " Another installation is already in progress. Wait for it to finish, then try again.";
       } else if (exitCode == 1602) {
