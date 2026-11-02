@@ -112,7 +112,7 @@ function ConvertFrom-DriverInstallSafetyInventoryResult {
     if ($markerLines.Count -ne 1) { throw 'Driver safety inventory returned a missing or ambiguous result. Driver unchanged.' }
 
     $encodedJson = $markerLines[0].Substring($markerPrefix.Length)
-    if ($encodedJson -notmatch '^[A-Za-z0-9+/]+={0,2}$') { throw 'Driver safety inventory returned malformed data. Driver unchanged.' }
+    if ($encodedJson -cnotmatch '^[A-Za-z0-9+/]+={0,2}$') { throw 'Driver safety inventory returned malformed data. Driver unchanged.' }
 
     try {
         $json = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encodedJson))
@@ -181,7 +181,15 @@ try {
 '@
     $queryScript = $queryScript.Replace('__REQUEST__', $requestBase64)
 
-    $output = Invoke-DriverInstallSafetyQuery -ScriptText $queryScript -TimeoutSeconds $TimeoutSeconds
+    try {
+        $output = Invoke-DriverInstallSafetyQuery -ScriptText $queryScript -TimeoutSeconds $TimeoutSeconds
+    } catch [TimeoutException] {
+        # A slow or temporarily busy inventory is not evidence of a missing driver.
+        # Retry the complete read-only snapshot once, with more time, before any
+        # version/trust decision. Never consume partial results from the first child.
+        Write-Host "Driver safety inventory exceeded its initial deadline; retrying once with a 60-second recovery budget. $($_.Exception.Message)"
+        $output = Invoke-DriverInstallSafetyQuery -ScriptText $queryScript -TimeoutSeconds 60
+    }
     return ConvertFrom-DriverInstallSafetyInventoryResult -OutputText $output
 }
 
@@ -577,9 +585,12 @@ function Invoke-DriverProcessCapture {
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             try {
                 $process.Kill()
-                $process.WaitForExit(5000) | Out-Null
+                [void]$process.WaitForExit(5000)
             } catch {
                 $null = $_
+            }
+            if (-not $process.HasExited) {
+                throw 'Inventory child termination could not be confirmed; refusing recovery. Driver unchanged.'
             }
             # Preserve only bounded, non-identifying inventory stage records.
             # Never include arbitrary partial provider output in the timeout error.
@@ -633,10 +644,10 @@ function Invoke-DriverInstallSafetyCommand {
         return (@($output) -join [Environment]::NewLine)
     } catch {
         $detail = [string]$_.Exception.Message
-        if ($detail.Contains("timed out after $TimeoutSeconds seconds")) {
+        if ($_.Exception -is [TimeoutException]) {
             $stages = [string]$_.Exception.Data['InventoryStages']
             if (-not $stages) { $stages = 'No inventory stage reported.' }
-            throw "Driver safety inventory timed out after $TimeoutSeconds seconds; driver unchanged. $stages"
+            throw [TimeoutException]::new("Driver safety inventory timed out after $TimeoutSeconds seconds; driver unchanged. $stages")
         }
         if ($detail -match 'failed with exit code (\d+)') {
             throw "Driver safety inventory failed with exit code $($Matches[1]); driver unchanged. $detail"
@@ -1193,7 +1204,7 @@ try {
     if ($markers.Count -ne 1) { throw 'Missing or ambiguous retained display inventory; automatic repair deferred.' }
     try {
         $encoded = $markers[0].Substring($prefix.Length)
-        if ($encoded -notmatch '^[A-Za-z0-9+/]+={0,2}$') { throw 'Malformed inventory encoding.' }
+        if ($encoded -cnotmatch '^[A-Za-z0-9+/]+={0,2}$') { throw 'Malformed inventory encoding.' }
         $inventory = ConvertFrom-Json -InputObject ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded))) -ErrorAction Stop
         foreach ($name in @('Nodes', 'SignedDrivers', 'Packages')) {
             $property = $inventory.PSObject.Properties[$name]

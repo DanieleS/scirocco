@@ -2,7 +2,7 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <!--
     Custom actions to implement the Windows installer behavior:
-    - Reset ACLs on install dir
+    - Validate the install directory without repairing untrusted ACLs
     - Update PATH (add/remove)
     - Migrate config files
     - Add/remove firewall rules
@@ -37,10 +37,6 @@
 
     <!-- VBScript to show a final repair-complete notification (full UI only) -->
     <Binary Id="RepairCompleteVbs" SourceFile="$(sys.SOURCEFILEDIR)repair_complete.vbs"/>
-
-    <!-- VBScripts for legacy Sunshine handling -->
-    <Binary Id="AskUninstallLegacySunshineVbs" SourceFile="$(sys.SOURCEFILEDIR)ask_uninstall_legacy_sunshine.vbs"/>
-    <Binary Id="WaitForLegacyUninstallVbs" SourceFile="$(sys.SOURCEFILEDIR)wait_for_legacy_uninstall.vbs"/>
     <Binary Id="RemoveConflictingProductsVbs" SourceFile="$(sys.SOURCEFILEDIR)remove_conflicting_products.vbs"/>
 
   </Fragment>
@@ -56,11 +52,11 @@
   <Fragment>
     <DirectoryRef Id="TARGETDIR">
       <Directory Id="ProgramMenuFolder">
-        <Directory Id="VIBEPOLLO_PROGRAM_MENU_FOLDER" Name="$(var.ProductDisplayName)">
+        <Directory Id="VIBEPOLLO_PROGRAM_MENU_FOLDER" Name="Vibepollo">
           <Component Id="StartMenuShortcut" Guid="{A3B4C5D6-E7F8-4A5B-9C2D-3E4F5A6B7C8D}">
             <Shortcut Id="VibepolloStartMenuShortcut"
-                      Name="$(var.ProductDisplayName)"
-                      Description="Launch $(var.ProductDisplayName) Web UI"
+                      Name="Vibepollo"
+                      Description="Launch Vibepollo Web UI"
                       Target="[INSTALL_ROOT]sunshine.exe"
                       Icon="ProductIcon.ico"
                       Arguments="--shortcut"
@@ -110,7 +106,7 @@
         <ServiceInstall
             Id="ApolloServiceInstall"
             Name="ApolloService"
-            DisplayName="$(var.ProductDisplayName) Service"
+            DisplayName="Apollo Service"
             Type="ownProcess"
             Start="auto"
             ErrorControl="normal"
@@ -140,20 +136,18 @@
   </Fragment>
 
   <Fragment>
-    <!-- Native MSI policy: direct MSI and bootstrapper installs are restricted
-         to descendants of ProgramFilesFolder. No INSTALL_ROOT value is ever
-         interpolated into command source. -->
+    <!-- The embedded native validator examines no-follow handles and owner/ACLs
+         before any action executes files from INSTALL_ROOT. The prefix check
+         below is only an early diagnostic, not the security boundary. -->
+    <Binary Id="InstallRootGuard" SourceFile="$(var.BinDir)\sunshine_install_guard.dll" />
+    <CustomAction Id="ValidateInstallRootPreview" BinaryKey="InstallRootGuard" DllEntry="ValidateInstallRootPreview" Execute="immediate" Return="check" />
+    <CustomAction Id="ValidateInstallRoot" BinaryKey="InstallRootGuard" DllEntry="ValidateInstallRoot" Execute="immediate" Return="check" />
     <CustomAction Id="BlockUnsafeInstallRoot"
                   Error="Vibepollo must be installed in a folder beneath Program Files." />
 
-    <!-- Post-install chores (config migration, installer migrations) run
-         AFTER InstallFiles. They are best-effort housekeeping, not prerequisites for
-         the app to boot: a failure here must NOT roll back / brick an otherwise complete
-         upgrade. Use Return="ignore" like the driver/Vulkan-layer actions below; Vibepollo
-         re-repairs config ACLs AND re-hardens the private credentials directory at startup
-         (statefile::repair_config_permissions / secure_private_directory, and create_creds
-         hardens it before writing the key), and the legacy config-key migrations are
-         idempotent on the next successful install. -->
+    <!-- Post-install housekeeping runs after InstallFiles. Migration and optional
+         driver/Vulkan-layer failures remain best-effort because the core application
+         can still install and the bootstrapper reports component warnings from logs. -->
     <CustomAction Id="MigrateConfig" BinaryKey="WixCA" DllEntry="WixQuietExec" Execute="deferred" Return="ignore" Impersonate="no" />
     <CustomAction Id="RunInstallerMigrations" BinaryKey="WixCA" DllEntry="WixQuietExec" Execute="deferred" Return="ignore" Impersonate="no" />
     <!-- Driver and Vulkan-layer installs stay Return="ignore" in Vibepollo: a failed
@@ -171,8 +165,6 @@
 
     <!-- Uninstall-time actions (deferred, elevated) -->
     <CustomAction Id="RestoreNvPrefsUndo" BinaryKey="WixCA" DllEntry="WixQuietExec" Execute="deferred" Return="ignore" Impersonate="no" />
-    <!-- Unregister the unlock credential provider and wipe its secrets on uninstall -->
-    <CustomAction Id="UnlockCleanup" BinaryKey="WixCA" DllEntry="WixQuietExec" Execute="deferred" Return="ignore" Impersonate="no" />
     <CustomAction Id="RemoveConflictingProducts" BinaryKey="RemoveConflictingProductsVbs" VBScriptCall="RemoveConflictingProducts" Execute="immediate" Return="check" />
     <!-- Quiet stop for repair/basic UI: proactively stop service when UI is too low for prompts -->
     <CustomAction Id="StopSvcQuietImmediate" BinaryKey="WixCA" DllEntry="CAQuietExec" Return="ignore" />
@@ -234,11 +226,6 @@
                  Property="RestoreNvPrefsUndo"
                  Value="&quot;[SystemFolder]cmd.exe&quot; /C if exist &quot;[INSTALL_ROOT]sunshine.exe&quot; ( &quot;[INSTALL_ROOT]sunshine.exe&quot; --restore-nvprefs-undo ) else ( exit /b 0 )"/>
 
-    <!-- Guard unlock cleanup on uninstall: only run if sunshine.exe still exists -->
-    <CustomAction Id="SetUnlockCleanup"
-                 Property="UnlockCleanup"
-                 Value="&quot;[SystemFolder]cmd.exe&quot; /C if exist &quot;[INSTALL_ROOT]sunshine.exe&quot; ( &quot;[INSTALL_ROOT]sunshine.exe&quot; --unlock-cleanup ) else ( exit /b 0 )"/>
-
     <CustomAction Id="SetUninstallSudovda"
                  Property="UninstallSudovda"
                  Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoLogo -NonInteractive -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALL_ROOT]drivers\sudovda\install.ps1&quot; -Uninstall"/>
@@ -291,12 +278,9 @@
                  Property="RemoveServiceQuiet"
                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoP -EP Bypass -C &quot;sc.exe delete SunshineService | Out-Null; sc.exe delete VibeshineService | Out-Null; sc.exe delete sunshinesvc | Out-Null; sc.exe delete ApolloService | Out-Null; sc.exe delete ApolloSvc | Out-Null&quot;"/>
 
-    <!-- Legacy Sunshine handling actions -->
-    <CustomAction Id="AskUninstallLegacySunshine" BinaryKey="AskUninstallLegacySunshineVbs" VBScriptCall="AskUninstallLegacySunshine" Execute="immediate" Return="check" />
-    <CustomAction Id="WaitForLegacyUninstall" BinaryKey="WaitForLegacyUninstallVbs" VBScriptCall="WaitForLegacyUninstall" Execute="immediate" Return="check" />
-
-    <CustomAction Id="BlockLegacySunshineStillPresent" Error="Legacy Sunshine is still installed. It must be removed before installing Vibepollo; click OK to start the uninstallation." />
-    <CustomAction Id="BlockUserCancelledLegacy" Error="Installation cancelled. Legacy Sunshine must be removed before installing Vibepollo." />
+    <!-- A direct MSI never elevates an executable from an opaque registry
+         command. The bootstrapper handles validated machine replacements. -->
+    <CustomAction Id="BlockLegacySunshine" Error="Legacy Sunshine is installed. Run the Vibepollo setup bootstrapper to replace it, or remove it using its trusted uninstaller before retrying this MSI." />
 
     <!-- UI-only prompt at end of a successful Repair to inform no reboot is required -->
     <CustomAction Id="RepairCompletePrompt" BinaryKey="RepairCompleteVbs" VBScriptCall="ShowRepairComplete" Execute="immediate" Return="ignore" />
@@ -310,7 +294,7 @@
       <Component Id="ArpCustomUninstallEntry" Guid="*" Win64="yes">
         <CreateFolder />
         <RegistryKey Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Vibepollo">
-          <RegistryValue Name="DisplayName" Type="string" Value="$(var.ProductDisplayName)" KeyPath="yes" />
+          <RegistryValue Name="DisplayName" Type="string" Value="Vibepollo" KeyPath="yes" />
           <!-- Human-readable semver; ProductVersion is ordinal-encoded (e.g.
                1.18.0-beta.2 -> 1.18.32.0) and would confuse users here. The
                bootstrapper's ParseVersion maps this string back into the
@@ -330,14 +314,14 @@
         <CreateFolder />
         <Firewall:FirewallException xmlns:Firewall="http://schemas.microsoft.com/wix/FirewallExtension"
                                     Id="FE_VibepolloExe"
-                                    Name="$(var.ProductDisplayName)"
+                                    Name="Vibepollo"
                                     Program="[INSTALL_ROOT]sunshine.exe"
                                     IgnoreFailure="yes"
                                     Profile="all"
                                     Scope="any" />
         <Firewall:FirewallException xmlns:Firewall="http://schemas.microsoft.com/wix/FirewallExtension"
                                     Id="FE_VibepolloSvcExe"
-                                    Name="$(var.ProductDisplayName) Service"
+                                    Name="Vibepollo Service"
                                     Program="[INSTALL_ROOT]tools\sunshinesvc.exe"
                                     IgnoreFailure="yes"
                                     Profile="all"

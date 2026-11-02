@@ -22,9 +22,8 @@
 #include "src/utility.h"
 
 #include <algorithm>
-#include <optional>
+#include <cstddef>
 #include <system_error>
-#include <utility>
 #include <vector>
 
 namespace {
@@ -32,96 +31,13 @@ namespace {
   constexpr wchar_t kDefaultDesktopW[] = L"winsta0\\default";
   constexpr wchar_t kWinlogonDesktopW[] = L"winsta0\\winlogon";
 
-  /// One end of a captured stream, plus the inheritable write end the child gets.
-  struct capture_pipe_t {
-    winrt::handle read;
-    winrt::handle write;
-  };
-
-  /// Create an anonymous pipe whose **write** end is inheritable and whose read
-  /// end explicitly is not: the child must not hold a handle to the reader, or
-  /// the parent would never see end-of-stream when the child dies.
-  std::optional<capture_pipe_t> make_capture_pipe() {
-    SECURITY_ATTRIBUTES sa {};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    sa.lpSecurityDescriptor = nullptr;
-
-    HANDLE read_end = nullptr;
-    HANDLE write_end = nullptr;
-    if (!CreatePipe(&read_end, &write_end, &sa, 0)) {
-      BOOST_LOG(error) << "CreatePipe failed while preparing helper capture, winerr=" << GetLastError();
-      return std::nullopt;
-    }
-    capture_pipe_t pipe {winrt::handle {read_end}, winrt::handle {write_end}};
-    if (!SetHandleInformation(pipe.read.get(), HANDLE_FLAG_INHERIT, 0)) {
-      BOOST_LOG(error) << "SetHandleInformation failed on a helper capture pipe, winerr=" << GetLastError();
-      return std::nullopt;
-    }
-    return pipe;
-  }
-
-  /// Owns the `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` allocation for the lifetime of
-  /// a `CreateProcess*` call. Without this list, `bInheritHandles=TRUE` would
-  /// hand the child *every* inheritable handle this process holds — and as a
-  /// service that is a great deal more than two pipe ends.
-  class handle_list_attribute_t {
-  public:
-    ~handle_list_attribute_t() {
-      if (list_) {
-        DeleteProcThreadAttributeList(list_);
-      }
-    }
-
-    handle_list_attribute_t(const handle_list_attribute_t &) = delete;
-    handle_list_attribute_t &operator=(const handle_list_attribute_t &) = delete;
-
-    handle_list_attribute_t() = default;
-
-    /// Build the list over `handles`, which must outlive this object and the
-    /// `CreateProcess*` call it is passed to.
-    bool init(STARTUPINFOEXW &si, std::vector<HANDLE> &handles) {
-      SIZE_T size = 0;
-      InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
-      if (size == 0) {
-        BOOST_LOG(error) << "InitializeProcThreadAttributeList sizing failed, winerr=" << GetLastError();
-        return false;
-      }
-      storage_.resize(size);
-      list_ = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage_.data());
-      if (!InitializeProcThreadAttributeList(list_, 1, 0, &size)) {
-        BOOST_LOG(error) << "InitializeProcThreadAttributeList failed, winerr=" << GetLastError();
-        list_ = nullptr;
-        return false;
-      }
-      if (!UpdateProcThreadAttribute(
-            list_,
-            0,
-            PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            handles.data(),
-            handles.size() * sizeof(HANDLE),
-            nullptr,
-            nullptr
-          )) {
-        BOOST_LOG(error) << "UpdateProcThreadAttribute(HANDLE_LIST) failed, winerr=" << GetLastError();
-        return false;
-      }
-      si.lpAttributeList = list_;
-      return true;
-    }
-
-  private:
-    std::vector<char> storage_;
-    LPPROC_THREAD_ATTRIBUTE_LIST list_ = nullptr;
-  };
-
   bool start_as_system_in_active_console_session(
     const std::wstring &cmd_line,
     const std::wstring &working_dir,
     DWORD creation_flags,
-    BOOL inherit_handles,
+    STARTUPINFOW &si,
+    bool inherit_handles,
     SECURITY_ATTRIBUTES *process_attributes,
-    STARTUPINFOEXW &si,
     PROCESS_INFORMATION &pi
   ) {
     const DWORD session_id = WTSGetActiveConsoleSessionId();
@@ -177,9 +93,9 @@ namespace {
     });
 
     // Ensure the child runs on the interactive window station/desktop for the active console session.
-    auto *prev_desktop = si.StartupInfo.lpDesktop;
+    auto *prev_desktop = si.lpDesktop;
     const auto try_launch = [&](const wchar_t *desktop) {
-      si.StartupInfo.lpDesktop = const_cast<LPWSTR>(desktop);
+      si.lpDesktop = const_cast<LPWSTR>(desktop);
       return CreateProcessAsUserW(
         raw_primary_token,
         nullptr,
@@ -203,7 +119,7 @@ namespace {
       launched_desktop = kWinlogonDesktopW;
     }
 
-    si.StartupInfo.lpDesktop = prev_desktop;
+    si.lpDesktop = prev_desktop;
     if (!ok) {
       BOOST_LOG(debug) << "CreateProcessAsUserW failed while launching SYSTEM child in active session (session_id="
                        << session_id << "), winerr=" << GetLastError();
@@ -229,8 +145,7 @@ bool ProcessHandler::start(
   const std::wstring &application_path,
   std::wstring_view arguments,
   bool allow_system_fallback,
-  helper_pipes_t *pipes,
-  std::span<const HANDLE> inherited_handles
+  bool restrict_process_access
 ) {
   if (running_) {
     // Check if the previously started process has already exited. If so, clear stale state.
@@ -272,53 +187,26 @@ bool ProcessHandler::start(
   BOOST_LOG(debug) << "Launching process: " << platf::to_utf8(application_path)
                    << (arguments.empty() ? "" : " with arguments") << " (hidden, detached)";
 
-  STARTUPINFOEXW si = {};
-  si.StartupInfo.cb = sizeof(si);
+  STARTUPINFOW si = {};
+  si.cb = sizeof(si);
 
-  // Optional stdout/stderr capture. The write ends are the only handles the
-  // child is allowed to inherit; both are closed in this process right after the
-  // launch, so a read on the parent side ends cleanly when the child exits.
-  std::optional<capture_pipe_t> out_pipe;
-  std::optional<capture_pipe_t> err_pipe;
-  std::vector<HANDLE> inherited;
-  handle_list_attribute_t handle_list;
-  BOOL inherit_handles = FALSE;
-  if (pipes) {
-    out_pipe = make_capture_pipe();
-    err_pipe = make_capture_pipe();
-    if (!out_pipe || !err_pipe) {
-      return false;
-    }
-    si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
-    si.StartupInfo.hStdOutput = out_pipe->write.get();
-    si.StartupInfo.hStdError = err_pipe->write.get();
-    si.StartupInfo.hStdInput = nullptr;
-    inherited = {out_pipe->write.get(), err_pipe->write.get()};
-  }
-  inherited.insert(inherited.end(), inherited_handles.begin(), inherited_handles.end());
-  if (!inherited.empty()) {
-    if (!handle_list.init(si, inherited)) {
-      return false;
-    }
-    inherit_handles = TRUE;
-  }
-
+  // Windows does not support inheriting handles across sessions.
+  const BOOL inherit_handles = FALSE;
   const bool parent_is_system = platf::is_running_as_system();
 
-  // A helper receiving privileged capabilities runs with the interactive
+  // A helper accepting privileged commands runs with the interactive
   // user's token, so its process object must not grant that user
   // PROCESS_DUP_HANDLE. The parent keeps its creation-time process handle;
   // only SYSTEM and Administrators may open another one.
   PSECURITY_DESCRIPTOR process_descriptor = nullptr;
   SECURITY_ATTRIBUTES process_attributes {sizeof(process_attributes), nullptr, FALSE};
   SECURITY_ATTRIBUTES *process_attributes_ptr = nullptr;
-  if (parent_is_system && !inherited_handles.empty()) {
+  if (parent_is_system && restrict_process_access) {
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
           L"O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)",
           SDDL_REVISION_1,
           &process_descriptor,
-          nullptr
-        )) {
+          nullptr)) {
       BOOST_LOG(error) << "Unable to build restricted child process security descriptor, error=" << GetLastError();
       return false;
     }
@@ -331,7 +219,7 @@ bool ProcessHandler::start(
     }
   });
 
-  DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
+  DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW;
   // When not using a job (keep-alive child), prefer to break away from any existing job to avoid kill-on-close
   if (!use_job_) {
     creation_flags |= CREATE_BREAKAWAY_FROM_JOB;
@@ -385,7 +273,14 @@ bool ProcessHandler::start(
 
       // Prefer launching into the active console session so display APIs (e.g., SetDisplayConfig)
       // have a better chance of working while Sunshine runs as a service.
-      if (start_as_system_in_active_console_session(cmd_line, working_dir, creation_flags, inherit_handles, process_attributes_ptr, si, pi_)) {
+      if (start_as_system_in_active_console_session(
+            cmd_line,
+            working_dir,
+            creation_flags,
+            si,
+            inherit_handles != FALSE,
+            process_attributes_ptr,
+            pi_)) {
         ret = TRUE;
       } else {
         ret = CreateProcessW(
@@ -424,16 +319,6 @@ bool ProcessHandler::start(
   if (ret && use_job_ && job_) {
     AssignProcessToJobObject(job_.get(), pi_.hProcess);
   }
-
-  // Hand the read ends over and drop our copies of the write ends. Holding a
-  // write end here would keep the pipe open after the child died, so the reader
-  // would block forever instead of seeing end-of-stream.
-  if (pipes && ret) {
-    pipes->stdout_read = std::move(out_pipe->read);
-    pipes->stderr_read = std::move(err_pipe->read);
-  }
-  out_pipe.reset();
-  err_pipe.reset();
 
   running_ = ret;
   if (!running_) {

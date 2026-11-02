@@ -13,7 +13,7 @@ import tempfile
 
 source_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[1] / "sunshinesvc.cpp"
 source = source_path.read_text()
-assert 'L"\\\\Vibeshine"' in source and 'L"\\\\Logs"' in source
+assert 'L"\\\\Vibepollo"' in source and 'L"\\\\Logs"' in source
 assert 'L"O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"' in source
 assert "FILE_FLAG_OPEN_REPARSE_POINT" in source
 assert "CREATE_NEW" in source

@@ -281,6 +281,8 @@ namespace config {
     bool keep_default;
     bool auto_capture;
     bool sink_capture_only;  ///< Capture the selected Windows audio sink without changing default outputs.
+    std::string format {"opus"};  ///< Encoded stream format: Opus, AC-3, or E-AC-3.
+    bool high_quality_audio {false};  ///< Higher bitrate for negotiated Dolby streams; ignored for Opus.
   };
 
   constexpr int ENCRYPTION_MODE_NEVER = 0;  // Never use video encryption, even if the client supports it
@@ -295,6 +297,8 @@ namespace config {
     int fec_percentage;
     int video_max_batch_size_kb;
     bool pacing_batch_demand_limit;  ///< Experimental per-call demand-based video batch sizing (default off).
+    bool pacing_group_demand_limit;  ///< Experimental per-frame demand pacing and batch bound (default off).
+    bool host_adaptive_pacing;  ///< Experimental loss-responsive packet spacing for ordinary video, never changing encoder bitrate or FPS (default off).
     int pyrowave_critical_fec_percentage;  ///< Parity on the PyroWave shards holding the coarsest wavelet level (at least 2 shards); 0 = none.
     bool client_roaming;  ///< Experimental: offer client roaming in DESCRIBE and move a session to a proven new client address (default off).
     bool experimental_packed_444;  ///< Experimental: offer packed 4:4:4 in a 4:2:0 frame (native NVENC D3D11 only) in DESCRIBE (default off).
@@ -352,6 +356,7 @@ namespace config {
 
     bool keyboard;
     bool mouse;
+    std::string keyboard_mouse_backend;
     bool controller;
 
     bool always_send_scancodes;

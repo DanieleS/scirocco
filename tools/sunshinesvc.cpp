@@ -262,7 +262,7 @@ HANDLE OpenLogFileHandle() {
     return open_null();
   }
   program_data.resize(wcslen(program_data.c_str()));
-  const std::wstring service_root = program_data + L"\\Vibeshine";
+  const std::wstring service_root = program_data + L"\\Vibepollo";
   const std::wstring log_directory = service_root + L"\\Logs";
   if (!SecureServiceDirectory(service_root) || !SecureServiceDirectory(log_directory)) {
     // Never traverse an untrusted or reparse-backed directory merely to retain

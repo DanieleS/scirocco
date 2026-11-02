@@ -10,6 +10,14 @@ endforeach()
 target_link_options(vibepollo_dualsense_haptics PRIVATE -municode)
 target_link_libraries(vibepollo_dualsense_haptics PRIVATE setupapi)
 target_link_libraries(vibepollo_dualsense_audio PRIVATE minhook::minhook ole32 propsys uuid shell32)
+if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|amd64|x86_64")
+    # Recent MinGW CRTs define FE_DFL_ENV in libmingw32's CRT_fp10 object,
+    # before libmingwex introduces its reference through fesetenv. Unlike an
+    # executable, DLL startup does not pull in _fpreset. Seed the reference so
+    # the normal archive order selects the CRT's own default environment;
+    # do not replace the environment or reset the injecting process's FPU.
+    target_link_options(vibepollo_dualsense_audio PRIVATE "LINKER:--undefined=__mingw_fe_dfl_env")
+endif()
 add_dependencies(sunshine vibepollo_dualsense_haptics vibepollo_dualsense_audio)
 # Fork addition (Scirocco): unlocking a locked session from a stream start.
 include("${CMAKE_SOURCE_DIR}/tools/unlock_provider/unlock_provider.cmake")
@@ -195,3 +203,14 @@ add_custom_target(package_installer
     DEPENDS package_msi
     COMMENT "Building custom installer executable"
 )
+
+# Run install-root security checks from the MSI Binary table before any action
+# can execute files from INSTALL_ROOT, including direct MSI maintenance.
+add_library(sunshine_install_guard SHARED "${CMAKE_SOURCE_DIR}/packaging/windows/install_root_guard.cpp")
+target_compile_definitions(sunshine_install_guard PRIVATE UNICODE _UNICODE WINVER=0x0A00 _WIN32_WINNT=0x0A00 NOMINMAX)
+target_link_libraries(sunshine_install_guard PRIVATE msi advapi32 shell32 ole32 uuid)
+target_link_options(sunshine_install_guard PRIVATE -static)
+set_target_properties(sunshine_install_guard PROPERTIES PREFIX "" OUTPUT_NAME "sunshine_install_guard"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<0:>")
+add_dependencies(sunshine sunshine_install_guard)
+# Embedded only in the signed MSI Binary table; no installed guard DLL is needed.
