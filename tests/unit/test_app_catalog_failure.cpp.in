@@ -48,8 +48,21 @@ namespace config {
   input_t input {};
 #if defined(_WIN32) || defined(SUNSHINE_TEST_WINDOWS_BUILTIN)
   sunshine_t sunshine {};
+  // The Benchmark entry stays off here; the fixture only needs it to compile.
+  video_t video {};
 #endif
 }
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(SUNSHINE_TEST_WINDOWS_BUILTIN)
+#define MAX_PATH 260
+inline unsigned long GetModuleFileNameW(void *, wchar_t *, unsigned long) { return 0; }
+#endif
+#if defined(_WIN32) || defined(SUNSHINE_TEST_WINDOWS_BUILTIN)
+namespace platf {
+  std::string to_utf8(const std::wstring &) { return {}; }
+}
+#endif
 #if defined(_WIN32) || defined(SUNSHINE_TEST_WINDOWS_BUILTIN)
 namespace VDISPLAY {
 @DRIVER_STATUS@
@@ -63,6 +76,7 @@ namespace proc {
   std::atomic<VDISPLAY::DRIVER_STATUS> vDisplayDriverStatus {VDISPLAY::DRIVER_STATUS::UNKNOWN};
 @BUILTIN_FACTORY@
 #endif
+  int benchmark_app_id = -1;
   int input_only_app_id = 123;
   std::string input_only_app_id_str = "123";
   int terminate_app_id = 456;

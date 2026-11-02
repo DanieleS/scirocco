@@ -6456,7 +6456,6 @@ namespace VibepolloInstaller {
       if (!IsProcessElevated() && (isInstallOperation || isUninstallOperation)) {
         return RunElevatedBootstrapperCli(arguments, cliArgs);
       }
-      string installRootFailure;
       if (isInstallOperation && !TryNormalizeAndValidateCliInstallRoot(cliArgs, out installRootFailure)) {
         var validationLog = BuildLogPath("cli_path_validation");
         installRootFailure += " Path: " + GetPropertyValue(cliArgs, "INSTALL_ROOT");
