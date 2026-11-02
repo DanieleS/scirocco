@@ -662,8 +662,12 @@ def private_pipe_transport():
     assert 'FILE_FLAG_FIRST_PIPE_INSTANCE' in pipes and 'PIPE_REJECT_REMOTE_CLIENTS' in pipes
     assert 'create_server_handle(private_pipe_name, false)' in integration
     assert 'authorize_server_pipe_client(endpoint_master.get(), h)' in integration
-    assert 'const BOOL inherit_handles = FALSE;' in process
-    assert 'PROC_THREAD_ATTRIBUTE_HANDLE_LIST' not in process
+    # Handles are inherited only for the optional stdout/stderr capture, and then
+    # only the two pipe write ends through an explicit handle list.
+    assert 'BOOL inherit_handles = FALSE;' in process
+    assert process.count('inherit_handles = TRUE;') == 1
+    assert 'PROC_THREAD_ATTRIBUTE_HANDLE_LIST' in process
+    assert 'inherited = {out_pipe->write.get(), err_pipe->write.get()};' in process
     assert 'parent_is_system && restrict_process_access' in process
     assert process.count('process_attributes_ptr,') >= 6
     assert 'O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)' in process

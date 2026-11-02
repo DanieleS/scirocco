@@ -12,7 +12,8 @@ args = parser.parse_args()
 nvhttp = (root / 'src/nvhttp.cpp').read_text()
 rtsp = (root / 'src/rtsp.cpp').read_text()
 utility = (root / 'src/utility.h').read_text()
-get_arg = nvhttp[nvhttp.index('    std::string get_arg('):nvhttp.index('    // Helper function to extract command entries', nvhttp.index('    std::string get_arg('))]
+get_arg_begin = nvhttp.index('    std::string get_arg(')
+get_arg = nvhttp[get_arg_begin:nvhttp.index('\n    }\n', get_arg_begin) + len('\n    }')]
 conversion = utility[utility.index('  inline std::int64_t from_chars('):utility.index('  template<class X, class Y>', utility.index('  inline std::int64_t from_chars('))]
 launch_begin = nvhttp.index('make_launch_session_from_snapshot(')
 launch_end = nvhttp.index('launch_session->gcpersist =', launch_begin)
