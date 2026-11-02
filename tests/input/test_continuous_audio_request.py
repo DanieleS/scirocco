@@ -26,6 +26,7 @@ code = r'''
 #include <cstdint>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
