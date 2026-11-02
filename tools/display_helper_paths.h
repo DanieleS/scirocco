@@ -249,7 +249,7 @@ namespace display_helper_paths {
     HKEY key = nullptr;
     const LSTATUS status = RegCreateKeyExW(
       HKEY_LOCAL_MACHINE,
-      L"SOFTWARE\\Nonary\\Vibeshine\\DisplayHelper",
+      L"SOFTWARE\\Nonary\\Vibepollo\\DisplayHelper",
       0,
       nullptr,
       REG_OPTION_NON_VOLATILE,
