@@ -2737,6 +2737,7 @@ namespace stream {
     }
 
     auto ratecontrol_next_frame_start = std::chrono::steady_clock::now();
+    std::uint64_t logged_remote_pacing_bps = 0;
     std::optional<std::chrono::steady_clock::time_point> last_frame_timestamp;
 
     struct wire_timeline_frame_t {
@@ -3015,6 +3016,28 @@ namespace stream {
           pacing_ceiling, blocksize + (session->video.cipher ? sizeof(video_packet_enc_prefix_t) : 0));
         size_t ratecontrol_packets_in_1ms = std::giga::num * 80 / 100 / 1000 / blocksize / 8;
         ratecontrol_packets_in_1ms = std::max<size_t>(1, ratecontrol_packets_in_1ms);
+        // A client streaming remotely (Moonlight asks for packets of 1024 bytes or less over a
+        // VPN or the internet) gets each frame spread out at 4x the stream's bitrate (at least
+        // 20 Mbps) instead of a sub-millisecond burst that small tunnel/firewall buffers drop.
+        // An explicit operator ceiling and PyroWave's own adaptive pacing take precedence.
+        bool remote_client_pacing = false;
+        if (!pyrowave_session && pacing_ceiling == 0 && session->config.packetsize <= 1024) {
+          const auto stream_kbps = session->video.pacing_bitrate_kbps.load(std::memory_order_relaxed);
+          const std::uint64_t stream_bps = stream_kbps > 0 ? std::uint64_t(stream_kbps) * 1000 : std::uint64_t(std::max(session->config.monitor.bitrate, 0)) * 1000;
+          if (stream_bps > 0) {
+            const std::uint64_t pacing_bps = std::max<std::uint64_t>(20'000'000, 4 * stream_bps);
+            const auto remote_packets_in_1ms = std::max<size_t>(1, pacing_bps / 1000 / blocksize / 8);
+            if (remote_packets_in_1ms < ratecontrol_packets_in_1ms) {
+              ratecontrol_packets_in_1ms = remote_packets_in_1ms;
+              remote_client_pacing = true;
+              if (pacing_bps != logged_remote_pacing_bps) {
+                BOOST_LOG(info) << "Video pacing: "sv << pacing_bps / 1'000'000 << " Mbps ("sv << stream_bps / 1'000'000
+                                << " Mbps stream, "sv << session->config.packetsize << "-byte packets)"sv;
+                logged_remote_pacing_bps = pacing_bps;
+              }
+            }
+          }
+        }
         std::size_t ordinary_batch_quantum_packets = 1;
         if (pacing_ceiling > 0 && capped_batch_packets == 0) {
           BOOST_LOG(error) << "Configured pacing ceiling has an invalid video datagram"sv;
@@ -3126,6 +3149,10 @@ namespace stream {
         }
         if (pacing_ceiling > 0) {
           max_batch_size_bytes = std::min(max_batch_size_bytes, capped_batch_packets * datagram_size);
+        }
+        if (remote_client_pacing) {
+          // A batch larger than one pacing group would leave as a burst.
+          max_batch_size_bytes = std::min(max_batch_size_bytes, ratecontrol_packets_in_1ms * datagram_size);
         }
 
         // Encryption adds a prefix to every datagram. Omitting it here lets a
