@@ -1704,6 +1704,23 @@ Windows only. The default is `true`.
 benchmark_app = enabled
 @endcode
 
+### allow_client_resolution_change
+
+Lets a paired client change the stream resolution from its game menu without
+reconnecting. The host announces the capability in the RTSP `featureFlags`
+(bit `0x400`) only when this option is enabled, the display resolution option is
+`automatic`, the stream was started with "Optimize game settings" and it is a
+normal game stream. A request (control message `0x5506`) is rounded down to even
+sizes, must be within 256 to 16384 per dimension, is rate limited to one every
+250 ms and is ignored while another client is streaming or when the capture
+display does not show the stream's size. HDR and PyroWave streams are not
+switched live. Clients without the feature are not affected. Windows only. The
+default is `true`.
+
+@code{}
+allow_client_resolution_change = enabled
+@endcode
+
 ### dd_configuration_option
 
 <table>

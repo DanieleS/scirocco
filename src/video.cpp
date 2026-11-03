@@ -5150,6 +5150,27 @@ namespace video {
     return completed;
   }
 
+  /**
+   * @brief Take the size a client asked for mid-stream (0x5506) before an encoder is created.
+   * @details The encoder always runs at the requested size, whatever mode the display passes through
+   * while it is being switched; the capture scaler fills the frame in the meantime.
+   */
+  void adopt_client_resolution(config_t &config) {
+    const auto previous_width = config.width;
+    const auto previous_height = config.height;
+    if (config.client_resolution_target && config.client_resolution_target->adopt(config.width, config.height)) {
+      BOOST_LOG(info) << "Encoder size changes to the client-requested resolution: " << previous_width << 'x' << previous_height
+                      << " -> " << config.width << 'x' << config.height;
+    }
+  }
+
+  /// The encoder is ready at the configured size: lets the control stream tell the client once it is.
+  void report_client_resolution(const config_t &config, const platf::display_t &disp) {
+    if (config.client_resolution_target) {
+      config.client_resolution_target->encoder_ready(config.width, config.height, disp.width, disp.height);
+    }
+  }
+
   enum class encode_run_result_e {
     completed,
     native_nvenc_identity_failed,
@@ -5476,6 +5497,8 @@ namespace video {
     }
     session->request_idr_frame();
     raise_hdr_info_if_changed(hdr_event, last_hdr_info, std::move(pending_hdr_info));
+    // Before the first frame, so the client hears about a new size ahead of its IDR
+    report_client_resolution(config, *disp);
 
     if (config.input_only) {
       BOOST_LOG(info) << "Input only session, video will not be captured."sv;
@@ -6064,6 +6087,7 @@ namespace video {
     sync_session_t encode_session;
 
     encode_session.ctx = &ctx;
+    adopt_client_resolution(ctx.config);
     const auto initialization_deadline = std::chrono::steady_clock::now() + 5s;
     initialization_cancel_t initialization_cancelled = [&]() {
       return ctx.shutdown_event && ctx.shutdown_event->peek();
@@ -6132,6 +6156,7 @@ namespace video {
       hdr_info = std::make_unique<hdr_info_raw_t>(true, session_hdr_metadata);
     }
     raise_hdr_info_if_changed(ctx.hdr_events, ctx.last_hdr_info, std::move(hdr_info));
+    report_client_resolution(ctx.config, *disp);
 
     encode_session.bootstrap.allow_placeholder_before_first_real = ctx.frame_nr <= 1;
     encode_session.session = std::move(session);
@@ -6803,6 +6828,9 @@ namespace video {
         }
         continue;
       }
+
+      // A client-requested size change takes effect with the encoder created below
+      adopt_client_resolution(config);
 
       auto *enc_ptr = chosen_encoder;
       if (!enc_ptr) {

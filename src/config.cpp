@@ -943,6 +943,7 @@ namespace config {
     true,  // remote_monitor_confirm_app_replacement
 
     true,  // benchmark_app
+    true,  // allow_client_resolution_change
 
     {
       video_t::dd_t::config_option_e::verify_only,  // configuration_option
@@ -2006,6 +2007,7 @@ namespace config {
     bool_f(vars, "remote_monitor_terminate_on_first_request", video.remote_monitor_terminate_on_first_request);
     bool_f(vars, "remote_monitor_confirm_app_replacement", video.remote_monitor_confirm_app_replacement);
     bool_f(vars, "benchmark_app", video.benchmark_app);
+    bool_f(vars, "allow_client_resolution_change", video.allow_client_resolution_change);
 
     generic_f(vars, "dd_configuration_option", video.dd.configuration_option, dd::config_option_from_view);
     generic_f(vars, "dd_resolution_option", video.dd.resolution_option, dd::resolution_option_from_view);

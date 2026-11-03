@@ -2063,6 +2063,14 @@ namespace rtsp_stream {
     {
       auto feature_flags = focus_hints::host_feature_flags((uint32_t) platf::get_capabilities(), focus_hints::offered(config::input.focus_hints));
       feature_flags = capture_action::host_feature_flags(feature_flags, capture_action::host_supported, config::input.capture_provider);
+      // Per session: only a normal game stream that the host display follows 1:1 can change size live
+      if (stream::client_resolution_change_enabled(
+            config::video,
+            session->enable_sops,
+            !session->input_only && session->role == remote_session::role_e::game && !session->secondary_game_client
+          )) {
+        feature_flags |= platf::platform_caps::client_resolution_change;
+      }
       ss << "a=x-ss-general.featureFlags:" << feature_flags << std::endl;
     }
 

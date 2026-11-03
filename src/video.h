@@ -20,10 +20,12 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <functional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 extern "C" {
@@ -38,6 +40,71 @@ namespace video_fec {
 }  // namespace video_fec
 
 namespace video {
+  /**
+   * @brief Encoder size of a session whose client changed the stream resolution live (0x5506).
+   *
+   * Shared between the control thread (which requests a size once the display mode was applied) and the
+   * encode loop (which adopts it whenever it (re)creates the encoder, so a display that passes through
+   * other modes never reaches the encoder). Once the encoder runs at the requested size the loop reports
+   * it, and the control thread tells the client (0x5507). The capture size the loop last saw is kept so
+   * the control thread can tell that the display still shows the stream.
+   */
+  class client_resolution_target_t {
+  public:
+    using size_t = std::pair<int, int>;
+
+    /// Control thread: the encoder must run at this size from its next (re)initialization on.
+    void request(int width, int height) {
+      std::lock_guard lock {mutex_};
+      requested_ = size_t {width, height};
+      announced_ = false;
+      pending_.reset();
+    }
+
+    /// Encode loop: use the requested size, if any, for the encoder about to be created.
+    /// @return whether the size differs from what @p width and @p height held.
+    bool adopt(int &width, int &height) {
+      std::lock_guard lock {mutex_};
+      if (!requested_ || (requested_->first == width && requested_->second == height)) {
+        return false;
+      }
+      width = requested_->first;
+      height = requested_->second;
+      return true;
+    }
+
+    /// Encode loop: an encoder at @p width x @p height is ready, fed by a capture of @p capture_width x @p capture_height.
+    void encoder_ready(int width, int height, int capture_width, int capture_height) {
+      std::lock_guard lock {mutex_};
+      capture_ = size_t {capture_width, capture_height};
+      if (requested_ && !announced_ && requested_->first == width && requested_->second == height) {
+        announced_ = true;
+        pending_ = requested_;
+      }
+    }
+
+    /// Control thread: the size to tell the client about, once, after the encoder runs at it.
+    std::optional<size_t> take_ready() {
+      std::lock_guard lock {mutex_};
+      auto result = pending_;
+      pending_.reset();
+      return result;
+    }
+
+    /// The last capture size reported by the encode loop, if any.
+    std::optional<size_t> capture_size() const {
+      std::lock_guard lock {mutex_};
+      return capture_;
+    }
+
+  private:
+    mutable std::mutex mutex_;
+    std::optional<size_t> requested_;
+    std::optional<size_t> pending_;
+    std::optional<size_t> capture_;
+    bool announced_ = false;
+  };
+
   /* Encoding configuration requested by remote client */
   struct config_t {
     // DO NOT CHANGE ORDER OR ADD FIELDS IN THE MIDDLE!!!!!
@@ -110,6 +177,8 @@ namespace video {
     // is PyroWave, which pins and reads each capture image's own texture and
     // keyed mutex, so the capture must give every image a stable copy.
     bool shared_capture_pyrowave = false;
+    // Shared with the session's control stream; only set for sessions that may change size live.
+    std::shared_ptr<client_resolution_target_t> client_resolution_target;
     // Packed 4:4:4 (video_packed444.h): 0 - off, 1 - on. width/height stay the logical size;
     // the encoder is created at video::packed444::coded_size(width, height).
     int chroma_packing = 0;
