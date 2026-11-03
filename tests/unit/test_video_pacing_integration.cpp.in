@@ -126,6 +126,7 @@ std::pair<size_t, size_t> pace(int cap, bool encrypted = false, bool pyro = fals
   video_short_frame_header_t frame_header{};
   const std::size_t payload_blocksize = blocksize - sizeof(video_packet_raw_t);
   const std::size_t min_parity_shards = session->config.minRequiredFecPackets;
+  std::uint64_t logged_remote_pacing_bps = 0;
   for (int once = 0; once != 1; ++once) {
 @PACER@
     if (pyrowave_session) {

@@ -85,6 +85,7 @@ namespace nvenc {
      * @param bitrate_kbps New bitrate in kbps.
      * @param reset_on_raise Reset rate control and force an IDR when the bitrate goes up, so the
      *        new ceiling applies at once. Without it the rate controller adapts gradually.
+     *        Ignored when the driver supports dynamic bitrate changes: those apply in place.
      * @return `true` if reconfigured in place; `false` if the caller must rebuild the encoder.
      */
     bool set_bitrate(int bitrate_kbps, bool reset_on_raise);
@@ -208,6 +209,10 @@ namespace nvenc {
     // saved_init_params.encodeConfig points at current_enc_config.
     NV_ENC_INITIALIZE_PARAMS saved_init_params {};
     NV_ENC_CONFIG current_enc_config {};
+
+    // NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE, read in create_encoder(); set_bitrate() skips the
+    // reset/IDR on a raise when true.
+    bool dyn_bitrate_change_supported = false;
 
     bool hdr_metadata_valid = false;
     SS_HDR_METADATA hdr_metadata {};

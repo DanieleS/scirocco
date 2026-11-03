@@ -1800,6 +1800,23 @@ Windows only. The default is `true`.
 benchmark_app = enabled
 @endcode
 
+### allow_client_resolution_change
+
+Lets a paired client change the stream resolution from its game menu without
+reconnecting. The host announces the capability in the RTSP `featureFlags`
+(bit `0x400`) only when this option is enabled, the display resolution option is
+`automatic`, the stream was started with "Optimize game settings" and it is a
+normal game stream. A request (control message `0x5506`) is rounded down to even
+sizes, must be within 256 to 16384 per dimension, is rate limited to one every
+250 ms and is ignored while another client is streaming or when the capture
+display does not show the stream's size. HDR and PyroWave streams are not
+switched live. Clients without the feature are not affected. Windows only. The
+default is `true`.
+
+@code{}
+allow_client_resolution_change = enabled
+@endcode
+
 ### dd_configuration_option
 
 <table>
@@ -4797,6 +4814,37 @@ directly to the NVIDIA Video Codec SDK and is preferred during automatic probing
     </tr>
 </table>
 
+### nvenc_intra_refresh
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Gradual decoder refresh. Instead of sending a periodic keyframe, which costs one large frame and a
+            matching latency spike, the encoder sweeps intra-coded regions across the picture so the refresh
+            cost is spread over many frames.
+            <br><br>
+            <code>disabled</code> enables intra-refresh only when the client asks for it. <code>enabled</code>
+            turns it on for every client regardless of what the client requested. Intra-refresh costs some
+            quality at the same bitrate.
+            @note{This option only applies when using the NVENC [encoder](#encoder), and only if the GPU
+            reports support for intra-refresh. It applies to H.264, HEVC and AV1.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            nvenc_intra_refresh = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ## Intel QuickSync Encoder
 
 ### qsv_preset
@@ -6172,10 +6220,6 @@ Enables legacy application ordering for clients and integrations that require it
 ### limit_framerate
 
 Limits capture and encoding to the requested stream frame rate.
-
-### nvenc_intra_refresh
-
-Uses NVIDIA intra refresh instead of full keyframes when supported.
 
 ### nvenc_temporal_aq
 

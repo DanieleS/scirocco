@@ -175,6 +175,7 @@ namespace config {
     bool remote_monitor_confirm_app_replacement;  ///< Require confirmation before an ungated launch replaces the active game.
 
     bool benchmark_app;  ///< Offer the hidden "Benchmark" app clients compare their streaming settings on.
+    bool allow_client_resolution_change;  ///< Let a client change the stream resolution mid-stream (control message 0x5506); also needs automatic resolution and "Optimize game settings".
 
     struct dd_t {
       struct workarounds_t {

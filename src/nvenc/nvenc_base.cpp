@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <format>
 #include <optional>
+#include <type_traits>
 
 // Make sure we check backwards compatibility when bumping the Video Codec SDK version
 // Things to look out for:
@@ -541,6 +542,7 @@ namespace nvenc {
       return value;
     };
     const auto encoder_engine_count = get_encoder_cap(NV_ENC_CAPS_NUM_ENCODER_ENGINES);
+    dyn_bitrate_change_supported = get_encoder_cap(NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE) != 0;
 
     NV_ENC_CONFIG enc_config {};
     if (have_preset_config) {
@@ -654,6 +656,40 @@ namespace nvenc {
 #endif
       };
 
+      // Gradual decoder refresh, enabled by the host option nvenc_intra_refresh or by the client
+      // asking for it through x-ss-video[0].intraRefresh. Period and count are the values the
+      // client-driven path has always used (299 frames of refresh every 300), so enabling the host
+      // option does not change what a client that already asked for it was receiving.
+      const bool want_intra_refresh = config.intra_refresh || client_config.enableIntraRefresh == 1;
+
+      auto set_intra_refresh = [&](auto &format_config, bool supports_single_slice) {
+        if (!want_intra_refresh) {
+          return;
+        }
+        if (!get_encoder_cap(NV_ENC_CAPS_SUPPORT_INTRA_REFRESH)) {
+          BOOST_LOG(error) << "NvEnc: intra-refresh requested by "
+                           << (config.intra_refresh ? "the host configuration" : "the client")
+                           << " but the encoder does not support it";
+          return;
+        }
+
+        format_config.enableIntraRefresh = 1;
+        format_config.intraRefreshPeriod = 300;
+        format_config.intraRefreshCnt = 299;
+
+        if constexpr (!std::is_same_v<std::decay_t<decltype(format_config)>, NV_ENC_CONFIG_AV1>) {
+          // AV1 has neither outputRecoveryPointSEI nor singleSliceIntraRefresh.
+          format_config.outputRecoveryPointSEI = 1;
+          if (supports_single_slice) {
+            if (get_encoder_cap(NV_ENC_CAPS_SINGLE_SLICE_INTRA_REFRESH)) {
+              format_config.singleSliceIntraRefresh = 1;
+            } else {
+              BOOST_LOG(warning) << "NvEnc: Single Slice Intra Refresh not supported";
+            }
+          }
+        }
+      };
+
       switch (client_config.videoFormat) {
       case 0:
         {
@@ -675,21 +711,7 @@ namespace nvenc {
           set_ref_frames(format_config.maxNumRefFrames, format_config.numRefL0, 5);
           set_minqp_if_enabled(config.min_qp_h264);
           fill_h264_hevc_vui(format_config.h264VUIParameters);
-          if (client_config.enableIntraRefresh == 1) {
-            if (get_encoder_cap(NV_ENC_CAPS_SUPPORT_INTRA_REFRESH)) {
-              format_config.enableIntraRefresh = 1;
-              format_config.intraRefreshPeriod = 300;
-              format_config.intraRefreshCnt = 299;
-              format_config.outputRecoveryPointSEI = 1;
-              if (get_encoder_cap(NV_ENC_CAPS_SINGLE_SLICE_INTRA_REFRESH)) {
-                format_config.singleSliceIntraRefresh = 1;
-              } else {
-                BOOST_LOG(warning) << "NvEnc: Single Slice Intra Refresh not supported";
-              }
-            } else {
-              BOOST_LOG(error) << "NvEnc: Client asked for intra-refresh but the encoder does not support intra-refresh";
-            }
-          }
+          set_intra_refresh(format_config, true);
           break;
         }
 
@@ -717,21 +739,7 @@ namespace nvenc {
             format_config.outputMasteringDisplay = hdr_metadata.maxDisplayLuminance != 0;
           }
 #endif
-          if (client_config.enableIntraRefresh == 1) {
-            if (get_encoder_cap(NV_ENC_CAPS_SUPPORT_INTRA_REFRESH)) {
-              format_config.enableIntraRefresh = 1;
-              format_config.intraRefreshPeriod = 300;
-              format_config.intraRefreshCnt = 299;
-              format_config.outputRecoveryPointSEI = 1;
-              if (get_encoder_cap(NV_ENC_CAPS_SINGLE_SLICE_INTRA_REFRESH)) {
-                format_config.singleSliceIntraRefresh = 1;
-              } else {
-                BOOST_LOG(warning) << "NvEnc: Single Slice Intra Refresh not supported";
-              }
-            } else {
-              BOOST_LOG(error) << "NvEnc: Client asked for intra-refresh but the encoder does not support intra-refresh";
-            }
-          }
+          set_intra_refresh(format_config, true);
           break;
         }
 
@@ -775,6 +783,7 @@ namespace nvenc {
             format_config.numTileRows = std::pow(2, std::ceil(std::log2(client_config.slicesPerFrame) / 2));
             format_config.numTileColumns = std::pow(2, std::floor(std::log2(client_config.slicesPerFrame) / 2));
           }
+          set_intra_refresh(format_config, false);
           break;
         }
     }
@@ -923,6 +932,9 @@ namespace nvenc {
       }
       if (encoder_params.rfi) {
         extra += " rfi";
+      }
+      if (config.intra_refresh || client_config.enableIntraRefresh == 1) {
+        extra += " intra-refresh";
       }
       if (init_params.enableWeightedPrediction) {
         extra += " weighted-prediction";
@@ -1243,10 +1255,12 @@ namespace nvenc {
     reconfigure_params.reInitEncodeParams = saved_init_params;
     reconfigure_params.reInitEncodeParams.encodeConfig = &enc_config;
 
-    // When raising the ceiling, reset the rate controller and force an IDR so the higher bitrate
-    // takes effect immediately instead of draining the old VBV first. Dynamic FEC skips this:
-    // its small, frequent shifts must not cost a keyframe each.
-    if (reset_on_raise && new_bitrate_bps > prev_bitrate_bps) {
+    // Drivers that report NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE apply the new rate in place, in
+    // both directions, so no keyframe is needed. Without the capability, raising the ceiling
+    // resets the rate controller and forces an IDR so the higher bitrate takes effect immediately
+    // instead of draining the old VBV first. Dynamic FEC skips this: its small, frequent shifts
+    // must not cost a keyframe each.
+    if (!dyn_bitrate_change_supported && reset_on_raise && new_bitrate_bps > prev_bitrate_bps) {
       reconfigure_params.resetEncoder = 1;
       reconfigure_params.forceIDR = 1;
     }

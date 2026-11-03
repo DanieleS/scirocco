@@ -730,6 +730,12 @@ export const settingsCategories: SettingsCategory[] = [
             placeholderKey: 'ui.settings.placeholders.resolution',
             visibleWhen: { key: 'dd_resolution_option', equals: 'manual' },
           }),
+          boolean('allow_client_resolution_change', {
+            labelKey: 'ui.settings.fields.allow_client_resolution_change.label',
+            descriptionKey: 'ui.settings.fields.allow_client_resolution_change.description',
+            platform: 'windows',
+            visibleWhen: { key: 'dd_resolution_option', equals: 'auto' },
+          }),
           select('dd_refresh_rate_option', [
             option('auto', 'ui.settings.options.refresh.auto'),
             option('prefer_highest', 'ui.settings.options.refresh.highest'),
@@ -1226,6 +1232,7 @@ export const settingsDefaults: Record<string, unknown> = {
   remote_monitor_terminate_on_first_request: false,
   remote_monitor_confirm_app_replacement: true,
   benchmark_app: true,
+  allow_client_resolution_change: true,
   dd_virtual_display_scale: 0,
   frame_limiter_enable: false,
   frame_limiter_provider: 'auto',
