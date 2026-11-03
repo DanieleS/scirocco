@@ -542,6 +542,7 @@ namespace nvenc {
       return value;
     };
     const auto encoder_engine_count = get_encoder_cap(NV_ENC_CAPS_NUM_ENCODER_ENGINES);
+    dyn_bitrate_change_supported = get_encoder_cap(NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE) != 0;
 
     NV_ENC_CONFIG enc_config {};
     if (have_preset_config) {
@@ -1254,10 +1255,12 @@ namespace nvenc {
     reconfigure_params.reInitEncodeParams = saved_init_params;
     reconfigure_params.reInitEncodeParams.encodeConfig = &enc_config;
 
-    // When raising the ceiling, reset the rate controller and force an IDR so the higher bitrate
-    // takes effect immediately instead of draining the old VBV first. Dynamic FEC skips this:
-    // its small, frequent shifts must not cost a keyframe each.
-    if (reset_on_raise && new_bitrate_bps > prev_bitrate_bps) {
+    // Drivers that report NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE apply the new rate in place, in
+    // both directions, so no keyframe is needed. Without the capability, raising the ceiling
+    // resets the rate controller and forces an IDR so the higher bitrate takes effect immediately
+    // instead of draining the old VBV first. Dynamic FEC skips this: its small, frequent shifts
+    // must not cost a keyframe each.
+    if (!dyn_bitrate_change_supported && reset_on_raise && new_bitrate_bps > prev_bitrate_bps) {
       reconfigure_params.resetEncoder = 1;
       reconfigure_params.forceIDR = 1;
     }
