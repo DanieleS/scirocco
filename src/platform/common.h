@@ -299,6 +299,7 @@ namespace platf {
 
     constexpr caps_t pen_touch = 0x01;  // Pen and touch events
     constexpr caps_t controller_touch = 0x02;  // Controller touch events
+    constexpr caps_t client_resolution_change = 0x400;  // Client-requested stream resolution changes (0x5506 RESOLUTION)
   };  // namespace platform_caps
 
   struct gamepad_state_t {

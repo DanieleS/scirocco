@@ -84,6 +84,7 @@ extern "C" {
 #ifdef _WIN32
   #include "platform/windows/frame_limiter.h"
   #include "platform/windows/display.h"
+  #include "platform/windows/display_helper_request_helpers.h"
   #include "platform/windows/ipc/misc_utils.h"
   #include "platform/windows/misc.h"
   #include "platform/windows/present_timing.h"
@@ -118,6 +119,8 @@ extern "C" {
 #define IDX_SET_CLIPBOARD 16
 #define IDX_FILE_TRANSFER_NONCE_REQUEST 17
 #define IDX_SET_ADAPTIVE_TRIGGERS 18
+#define IDX_DYNAMIC_PARAM_CHANGE 19
+#define IDX_RESOLUTION_CHANGE 20
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -139,7 +142,12 @@ static const short packetTypes[] = {
   0x3001,  // Set Clipboard (Apollo protocol extension)
   0x3002,  // File transfer nonce request (Apollo protocol extension)
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
+  0x5506,  // Dynamic parameter change, client to host (Sunshine protocol extension)
+  0x5507,  // Resolution change, host to client (Sunshine protocol extension)
 };
+
+// Dynamic parameter types of IDX_DYNAMIC_PARAM_CHANGE; only the resolution is handled here
+#define SS_DYNAMIC_PARAM_TYPE_RESOLUTION 0
 
 namespace asio = boost::asio;
 namespace sys = boost::system;
@@ -150,6 +158,32 @@ using asio::ip::udp;
 using namespace std::literals;
 
 namespace stream {
+  bool client_resolution_change_enabled([[maybe_unused]] const config::video_t &video_config, [[maybe_unused]] bool session_enable_sops, [[maybe_unused]] bool video_session) {
+#ifdef _WIN32
+    return video_config.allow_client_resolution_change &&
+           video_config.dd.resolution_option == config::video_t::dd_t::resolution_option_e::automatic &&
+           session_enable_sops && video_session;
+#else
+    // Live display mode switching is only implemented on Windows.
+    return false;
+#endif
+  }
+
+  std::optional<std::pair<int, int>> normalize_client_resolution_request(int width, int height) {
+    // The floor matches the client's and keeps tiny sizes away from display modes that Windows or the
+    // virtual display driver may reject mid-stream.
+    constexpr int min_dimension = 256;
+    constexpr int max_dimension = 16384;
+
+    // Encoders require even dimensions.
+    width &= ~1;
+    height &= ~1;
+    if (width < min_dimension || width > max_dimension || height < min_dimension || height > max_dimension) {
+      return std::nullopt;
+    }
+    return std::make_pair(width, height);
+  }
+
   namespace {
     std::string current_server_version() {
       std::string version = PROJECT_VERSION;
@@ -472,6 +506,14 @@ namespace stream {
     SS_HDR_METADATA metadata;
   };
 
+  // Sunshine protocol extension: the size of the video frames from now on
+  struct control_resolution_change_t {
+    control_header_v2 header;
+
+    std::uint32_t width;
+    std::uint32_t height;
+  };
+
   // Vibepollo protocol extension, see focus_hints.h
   struct control_focus_hint_t {
     control_header_v2 header;
@@ -788,6 +830,17 @@ namespace stream {
     std::uint64_t remote_role_generation {};
     std::string monitor_profile_uuid;
     bool input_only {};
+    bool enable_sops {};  ///< The client asked for "Optimize game settings" at launch.
+
+    // Live resolution change (client -> host 0x5506). The target is shared with the encode loop; the rest
+    // is only touched by the control thread, apart from the worker that applies the display mode.
+    std::shared_ptr<video::client_resolution_target_t> resolution_target;
+    std::shared_ptr<rtsp_stream::launch_session_t> display_request_session;  ///< What the display helper needs to rebuild the mode.
+    std::chrono::steady_clock::time_point client_resolution_last_request {};
+    std::atomic<std::uint64_t> stream_size {};  ///< Packed width << 32 | height the client sees.
+    std::atomic_bool resolution_busy {false};
+    std::thread resolution_worker;
+
     bool audio_disabled {};
     std::atomic_bool client_disconnected {false};
 
@@ -1932,6 +1985,171 @@ namespace stream {
     return 0;
   }
 
+  int send_resolution_change(session_t *session, int width, int height) {
+    if (!session->control.peer) {
+      BOOST_LOG(warning) << "Couldn't send resolution change, still waiting for PING from Moonlight"sv;
+      return -1;
+    }
+
+    control_resolution_change_t plaintext {};
+    plaintext.header.type = packetTypes[IDX_RESOLUTION_CHANGE];
+    plaintext.header.payloadLength = sizeof(control_resolution_change_t) - sizeof(control_header_v2);
+    plaintext.width = static_cast<std::uint32_t>(width);
+    plaintext.height = static_cast<std::uint32_t>(height);
+
+    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
+      encrypted_payload;
+
+    auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
+    if (session->broadcast_ref->control_server.send(payload, session->control.peer)) {
+      TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
+      BOOST_LOG(warning) << "Couldn't send resolution change to ["sv << addr << ':' << port << ']';
+
+      return -1;
+    }
+
+    BOOST_LOG(debug) << "Sent resolution change: "sv << width << 'x' << height;
+    return 0;
+  }
+
+#ifdef _WIN32
+  // The display request the launch built, for another size. The launch's own override (a client-chosen host
+  // display size) is replaced too, as the display only follows this stream 1:1.
+  static rtsp_stream::launch_session_t live_resolution_request_session(const rtsp_stream::launch_session_t &launch, int width, int height) {
+    auto request_session = display_helper_integration::helpers::make_display_request_session_snapshot(launch);
+    request_session.width = width;
+    request_session.height = height;
+    if (request_session.resolution_override) {
+      request_session.resolution_override = rtsp_stream::launch_session_t::resolution_override_t {width, height};
+    }
+    return request_session;
+  }
+#endif
+
+  /**
+   * @brief Handle a client's request to change the stream resolution (control message 0x5506, type RESOLUTION).
+   * @details Anything that is not certain to leave a consistent stream is ignored without a reply; the client
+   * then times out and falls back to reconnecting. The display mode is applied on a worker, since the display
+   * helper can take seconds and the control thread must keep answering pings. Once the mode is applied the
+   * encoder is told its new size and restarted; the encode loop reports when it runs at that size and the
+   * control thread then sends 0x5507.
+   */
+  static void handle_resolution_change(session_t *session, int requested_width, int requested_height) {
+    const bool video_session = !session->input_only && session->remote_role == remote_session::role_e::game && !session->secondary_game_client;
+    // Re-evaluated here: the feature flag was computed at DESCRIBE and the config may have changed since.
+    if (!client_resolution_change_enabled(config::video, session->enable_sops, video_session) ||
+        !session->resolution_target || !session->display_request_session) {
+      BOOST_LOG(info) << "Ignoring client resolution change request to " << requested_width << 'x' << requested_height
+                      << ": requires allow_client_resolution_change, automatic resolution, \"Optimize game settings\" and a normal game stream";
+      return;
+    }
+
+    const auto &video = session->config.monitor;
+    if (video.videoFormat == pyrowave::protocol::BITSTREAM_FORMAT || video.dynamicRange != 0 || video.chroma_packing != 0) {
+      BOOST_LOG(info) << "Ignoring client resolution change request: only SDR H.264, HEVC and AV1 streams change size live";
+      return;
+    }
+
+    const auto requested = normalize_client_resolution_request(requested_width, requested_height);
+    if (!requested) {
+      BOOST_LOG(warning) << "Invalid resolution value: " << requested_width << 'x' << requested_height;
+      return;
+    }
+    const int new_width = requested->first;
+    const int new_height = requested->second;
+
+    const auto packed_size = session->stream_size.load(std::memory_order_acquire);
+    const int old_width = static_cast<int>(packed_size >> 32);
+    const int old_height = static_cast<int>(packed_size & 0xffffffffu);
+
+    BOOST_LOG(info) << "Dynamic resolution change requested: " << old_width << 'x' << old_height
+                    << " -> " << new_width << 'x' << new_height;
+
+    if (old_width == new_width && old_height == new_height) {
+      BOOST_LOG(debug) << "Resolution unchanged, ignoring request";
+      return;
+    }
+
+    // Clients debounce resizes; this only sheds request storms. It is measured from the start of the
+    // previous attempt, so a request that queued up behind a slow mode switch is still applied.
+    const auto now = std::chrono::steady_clock::now();
+    if (now - session->client_resolution_last_request < std::chrono::milliseconds(250)) {
+      BOOST_LOG(info) << "Dropping client resolution change request to " << new_width << 'x' << new_height
+                      << ": less than 250 ms since the previous request";
+      return;
+    }
+    session->client_resolution_last_request = now;
+
+    // A mode change would hit another client's display.
+    if (stream::session::running_sessions.load(std::memory_order_acquire) != 1) {
+      BOOST_LOG(info) << "Ignoring client resolution change request: other sessions are active";
+      return;
+    }
+
+    // The encoder is scaled from the capture, so a client-driven size is only exact while the capture
+    // display still shows this stream's size: the launch mode (or the last change) was applied 1:1
+    // and the host display has not changed underneath.
+    const auto shown = session->resolution_target->capture_size();
+    if (!shown ||
+        !((shown->first == old_width && shown->second == old_height) ||
+          (shown->first == old_height && shown->second == old_width))) {
+      BOOST_LOG(info) << "Ignoring client resolution change request: the capture display does not show the stream resolution "
+                      << old_width << 'x' << old_height;
+      return;
+    }
+
+#ifdef _WIN32
+    if (session->resolution_busy.exchange(true, std::memory_order_acq_rel)) {
+      BOOST_LOG(info) << "Dropping client resolution change request to " << new_width << 'x' << new_height
+                      << ": the previous one is still being applied";
+      return;
+    }
+    if (session->resolution_worker.joinable()) {
+      session->resolution_worker.join();
+    }
+
+    session->resolution_worker = std::thread([session, new_width, new_height]() {
+      auto release = util::fail_guard([session]() {
+        session->resolution_busy.store(false, std::memory_order_release);
+      });
+
+      // Same request the launch built, with the size the client asked for
+      auto request_session = live_resolution_request_session(*session->display_request_session, new_width, new_height);
+      auto request = display_helper_integration::helpers::build_request_from_session(config::video, request_session, false);
+      if (!request) {
+        BOOST_LOG(warning) << "Dynamic resolution change to " << new_width << 'x' << new_height << " was not applied: no display request";
+        return;
+      }
+
+      // Only a mode the helper accepted counts. A deferred or failed apply changes nothing, so the client can ask again.
+      if (!display_helper_integration::apply(
+            *request,
+            nullptr,
+            [session]() { return session->shutdown_event->peek(); },
+            display_helper_integration::ApplyRetryPolicy::Full
+          )) {
+        BOOST_LOG(warning) << "Dynamic display reconfiguration to " << new_width << 'x' << new_height << " was not applied";
+        return;
+      }
+      if (session->shutdown_event->peek()) {
+        return;
+      }
+
+      // From here the encoder runs at the requested size whatever mode the display passes through.
+      session->resolution_target->request(new_width, new_height);
+      session->stream_size.store((static_cast<std::uint64_t>(new_width) << 32) | static_cast<std::uint32_t>(new_height), std::memory_order_release);
+      session->config.monitor.width = new_width;
+      session->config.monitor.height = new_height;
+
+      // Recreate the capture and the encoder; the new encoder's first frame is an IDR
+      mail::man->event<int>(mail::switch_display)->raise(-1);
+      session->video.idr_events->raise(true);
+
+      BOOST_LOG(info) << "Dynamic stream resolution updated: " << new_width << 'x' << new_height;
+    });
+#endif
+  }
+
   static std::int64_t steady_now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
   }
@@ -2032,6 +2250,30 @@ namespace stream {
         return;
       }
       session->video.idr_events->raise(true);
+    });
+
+    server->map(packetTypes[IDX_DYNAMIC_PARAM_CHANGE], [](session_t *session, const std::string_view &payload) {
+      BOOST_LOG(debug) << "type [IDX_DYNAMIC_PARAM_CHANGE]"sv;
+
+      // u32 param type, then the parameters of that type; other types are not ours to handle
+      const auto type = util::packet::read_u32_le(payload, 0);
+      if (!type || *type != SS_DYNAMIC_PARAM_TYPE_RESOLUTION) {
+        return;
+      }
+      const auto width = util::packet::read_u32_le(payload, sizeof(std::uint32_t));
+      const auto height = util::packet::read_u32_le(payload, 2 * sizeof(std::uint32_t));
+      if (!width || !height) {
+        BOOST_LOG(warning) << "Ignoring short IDX_DYNAMIC_PARAM_CHANGE resolution payload (" << payload.size() << " bytes)";
+        return;
+      }
+
+      // Out of range values must not wrap into valid ones
+      constexpr std::uint32_t max_dimension = 1 << 20;
+      handle_resolution_change(
+        session,
+        static_cast<int>(std::min(*width, max_dimension)),
+        static_cast<int>(std::min(*height, max_dimension))
+      );
     });
 
     server->map(packetTypes[IDX_INVALIDATE_REF_FRAMES], [&](session_t *session, const std::string_view &payload) {
@@ -2452,6 +2694,13 @@ namespace stream {
             if (session->control.peer && focus_hint_events->peek()) {
               if (auto kind = focus_hint_events->pop()) {
                 send_focus_hint(session, *kind);
+              }
+            }
+
+            // The encoder now runs at the size the client asked for; it can prepare its decoder
+            if (session->control.peer && session->resolution_target) {
+              if (const auto ready = session->resolution_target->take_ready()) {
+                send_resolution_change(session, ready->first, ready->second);
               }
             }
           }
@@ -4364,6 +4613,11 @@ namespace stream {
       // Release input before any potentially hung capture joins.
       input::reset(session.input);
 
+      // A live resolution change in flight gives up once the session is shutting down
+      if (session.resolution_worker.joinable()) {
+        session.resolution_worker.join();
+      }
+
       // Leave the focus detector first, so nothing posts into a session that is going away.
       // The last session to leave joins its thread, which waits out at most one UI Automation
       // call (500 ms timeout).
@@ -4887,6 +5141,26 @@ namespace stream {
           config::video.remote_monitor_mute_audio
         );
       session->config.monitor.input_only = session->input_only;
+      session->enable_sops = launch_session.enable_sops;
+      session->stream_size.store(
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(session->config.monitor.width)) << 32) |
+          static_cast<std::uint32_t>(session->config.monitor.height),
+        std::memory_order_release
+      );
+      // Only a session that announced the feature can change size; every other one is left untouched
+      if (client_resolution_change_enabled(
+            config::video,
+            launch_session.enable_sops,
+            !session->input_only && launch_session.role == remote_session::role_e::game && !launch_session.secondary_game_client
+          )) {
+        session->resolution_target = std::make_shared<video::client_resolution_target_t>();
+        session->config.monitor.client_resolution_target = session->resolution_target;
+#ifdef _WIN32
+        session->display_request_session = std::make_shared<rtsp_stream::launch_session_t>(
+          display_helper_integration::helpers::make_display_request_session_snapshot(launch_session)
+        );
+#endif
+      }
       const auto capture_plan = remote_session::capture_plan(
         session->input_only ? remote_session::role_e::input : launch_session.role,
         launch_session.remote_capture_output

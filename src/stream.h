@@ -37,7 +37,30 @@ namespace video_fec {
   class budget_t;
 }  // namespace video_fec
 
+namespace config {
+  struct video_t;
+}
+
 namespace stream {
+  /**
+   * @brief Whether a session may change the stream resolution while it runs (control message 0x5506).
+   *
+   * Shared by the RTSP feature flag (platf::platform_caps::client_resolution_change) and the control
+   * stream handler so the two cannot drift. Besides the option, the host display must follow the
+   * stream 1:1, which holds for automatic resolution together with "Optimize game settings".
+   * Always false off Windows, where live display mode switching is not implemented.
+   * @param video_config The host video configuration.
+   * @param session_enable_sops Whether the client asked for "Optimize game settings".
+   * @param video_session Whether this is a normal game video stream (not input only, Remote Monitor or secondary).
+   */
+  bool client_resolution_change_enabled(const config::video_t &video_config, bool session_enable_sops, bool video_session);
+
+  /**
+   * @brief Validate a client-requested stream resolution.
+   * @return The size rounded down to even dimensions, or nullopt when a dimension is out of range.
+   */
+  std::optional<std::pair<int, int>> normalize_client_resolution_request(int width, int height);
+
   constexpr auto VIDEO_STREAM_PORT = 9;
   constexpr auto CONTROL_PORT = 10;
   constexpr auto AUDIO_STREAM_PORT = 11;
