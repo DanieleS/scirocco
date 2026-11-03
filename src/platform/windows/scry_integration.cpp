@@ -661,7 +661,7 @@ namespace platf::scry {
 
       helper_pipes_t pipes;
       ProcessHandler child(true);
-      if (!child.start(helper.wstring(), args, false, &pipes)) {
+      if (!child.start(helper.wstring(), args, false, false, &pipes)) {
         BOOST_LOG(warning) << "scry: could not start the telemetry helper";
         return helper_end_e::exited;
       }

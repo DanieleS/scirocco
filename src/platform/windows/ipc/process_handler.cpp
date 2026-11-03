@@ -22,6 +22,7 @@
 #include "src/utility.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <optional>
 #include <system_error>
 #include <utility>
@@ -119,9 +120,9 @@ namespace {
     const std::wstring &cmd_line,
     const std::wstring &working_dir,
     DWORD creation_flags,
-    BOOL inherit_handles,
-    SECURITY_ATTRIBUTES *process_attributes,
     STARTUPINFOEXW &si,
+    bool inherit_handles,
+    SECURITY_ATTRIBUTES *process_attributes,
     PROCESS_INFORMATION &pi
   ) {
     const DWORD session_id = WTSGetActiveConsoleSessionId();
@@ -229,8 +230,8 @@ bool ProcessHandler::start(
   const std::wstring &application_path,
   std::wstring_view arguments,
   bool allow_system_fallback,
-  helper_pipes_t *pipes,
-  std::span<const HANDLE> inherited_handles
+  bool restrict_process_access,
+  helper_pipes_t *pipes
 ) {
   if (running_) {
     // Check if the previously started process has already exited. If so, clear stale state.
@@ -294,31 +295,26 @@ bool ProcessHandler::start(
     si.StartupInfo.hStdError = err_pipe->write.get();
     si.StartupInfo.hStdInput = nullptr;
     inherited = {out_pipe->write.get(), err_pipe->write.get()};
-  }
-  inherited.insert(inherited.end(), inherited_handles.begin(), inherited_handles.end());
-  if (!inherited.empty()) {
     if (!handle_list.init(si, inherited)) {
       return false;
     }
     inherit_handles = TRUE;
   }
-
   const bool parent_is_system = platf::is_running_as_system();
 
-  // A helper receiving privileged capabilities runs with the interactive
+  // A helper accepting privileged commands runs with the interactive
   // user's token, so its process object must not grant that user
   // PROCESS_DUP_HANDLE. The parent keeps its creation-time process handle;
   // only SYSTEM and Administrators may open another one.
   PSECURITY_DESCRIPTOR process_descriptor = nullptr;
   SECURITY_ATTRIBUTES process_attributes {sizeof(process_attributes), nullptr, FALSE};
   SECURITY_ATTRIBUTES *process_attributes_ptr = nullptr;
-  if (parent_is_system && !inherited_handles.empty()) {
+  if (parent_is_system && restrict_process_access) {
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
           L"O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)",
           SDDL_REVISION_1,
           &process_descriptor,
-          nullptr
-        )) {
+          nullptr)) {
       BOOST_LOG(error) << "Unable to build restricted child process security descriptor, error=" << GetLastError();
       return false;
     }
@@ -331,7 +327,10 @@ bool ProcessHandler::start(
     }
   });
 
-  DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
+  DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW;
+  if (pipes) {
+    creation_flags |= EXTENDED_STARTUPINFO_PRESENT;
+  }
   // When not using a job (keep-alive child), prefer to break away from any existing job to avoid kill-on-close
   if (!use_job_) {
     creation_flags |= CREATE_BREAKAWAY_FROM_JOB;
@@ -385,7 +384,14 @@ bool ProcessHandler::start(
 
       // Prefer launching into the active console session so display APIs (e.g., SetDisplayConfig)
       // have a better chance of working while Sunshine runs as a service.
-      if (start_as_system_in_active_console_session(cmd_line, working_dir, creation_flags, inherit_handles, process_attributes_ptr, si, pi_)) {
+      if (start_as_system_in_active_console_session(
+            cmd_line,
+            working_dir,
+            creation_flags,
+            si,
+            inherit_handles != FALSE,
+            process_attributes_ptr,
+            pi_)) {
         ret = TRUE;
       } else {
         ret = CreateProcessW(

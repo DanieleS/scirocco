@@ -762,7 +762,7 @@ for invariant in (
     "request->set_connection_context(authority)",
     "std::vector<std::weak_ptr<authority_t>> authorities",
     "authority->authorized.load(std::memory_order_acquire)",
-    "client_root.named_devices.size() >= pairing_policy::max_paired_clients",
+    "pairing_policy::admit_paired_client(records, *candidate_identity)",
     "if (!add_authorized_client",
 ):
     require(nvhttp + tls_identity, invariant, "exact enabled-pairing TLS authorization")
@@ -795,6 +795,14 @@ if not (
 unpair_body = nvhttp.split("bool unpair_client", 1)[1].split("}  // namespace nvhttp", 1)[0]
 require(unpair_body, "revoke_paired_client_access(uuid)", "paired-client removal revocation")
 forbid(unpair_body, "load_state()", "paired-client removal durability")
+# Wiring guard only: behavior of layout cleanup is tested in the topology unit.
+for needle in ("display_layout_mutex", "remove_client_from_layout", "client_root.remote_display_layout_json = layout.dump()", "instance().set_layout(std::move(layout))", "save_state()"):
+    require(unpair_body, needle, "paired-client layout cleanup")
+layout_put_body = nvhttp.split("bool set_remote_display_layout", 1)[1].split("void mark_client_last_seen", 1)[0]
+require(layout_put_body, "display_layout_mutex", "layout PUT serialization")
+erase_all_body = nvhttp.split("bool erase_all_clients()", 1)[1].split("bool update_device_info", 1)[0]
+require(erase_all_body, "display_layout_mutex", "erase-all layout serialization")
+require(erase_all_body, "instance().set_layout(nlohmann::json {})", "erase-all runtime layout reset")
 
 save_body = nvhttp.split("bool save_state()", 1)[1].split("std::string get_server_cert", 1)[0]
 fresh_state_position = save_body.index("config::flag::FRESH_STATE")
