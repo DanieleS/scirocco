@@ -113,6 +113,7 @@ std::pair<size_t, size_t> pace(int cap, bool encrypted = false, bool pyro = fals
                                      (monitor.client_requested_bitrate > 0 ? monitor.client_requested_bitrate : monitor.bitrate) :
                                      (monitor.bitrate > 0 ? monitor.bitrate : monitor.client_requested_bitrate);
   session->video.pacing_bitrate_kbps.store(pacing_bitrate_kbps, std::memory_order_relaxed);
+  std::uint64_t logged_remote_pacing_bps = 0;
   for (int once = 0; once != 1; ++once) {
 @PACER@
     if (pyrowave_session) {
