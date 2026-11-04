@@ -29,7 +29,7 @@ const context = vm.createContext({ structuredClone, toRaw: (value: unknown) => v
 vm.runInContext(code, context);
 const call = (name: string, ...arguments_: unknown[]) => context[name](...arguments_);
 const device = (allow_sleep?: unknown) =>
-  call('normalizeDevice', { uuid: 'paired', name: 'Client', perm: 0x071f1f00, allow_sleep }, 0);
+  call('normalizeDevice', { uuid: 'paired', name: 'Client', perm: 0x077f1f00, allow_sleep }, 0);
 
 test('sleep authority is default off and accepts only an explicit boolean grant', () => {
   for (const value of [undefined, null, false, 'true', '1', 1]) {
@@ -62,4 +62,24 @@ test('unrelated edits preserve a concurrent sleep grant or revocation', () => {
     assert.equal(merged.draft.name, 'Renamed locally');
     assert.equal(call('updatePayload', device(allowed), merged.draft).allow_sleep, allowed);
   }
+});
+
+test('telemetry and unlock permissions survive loading and saving a client', () => {
+  const telemetryRead = 0x00200000;
+  const unlock = 0x00400000;
+  const current = call(
+    'normalizeDevice',
+    {
+      uuid: 'paired',
+      name: 'Client',
+      perm: 0x03000000 | telemetryRead | unlock,
+    },
+    0,
+  );
+  const draft = call('draftFromDevice', current);
+  assert.equal(draft.permissions & (telemetryRead | unlock), telemetryRead | unlock);
+  assert.equal(
+    call('updatePayload', current, draft).perm & (telemetryRead | unlock),
+    telemetryRead | unlock,
+  );
 });

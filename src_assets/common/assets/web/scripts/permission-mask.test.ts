@@ -69,3 +69,12 @@ test('client editor permission toggles match crypto::PERM bits', () => {
     assert.equal(Number(mask), perm[key], `ClientSettingsEditor ${key}`);
   }
 });
+
+test('devices view permission mask matches crypto::PERM::_all', () => {
+  // A narrower copy strips the newer bits (telemetry_read, unlock) when the editor loads a
+  // client, so their toggles never show as granted and a save writes them back as revoked.
+  const view = readFileSync(new URL('../views/DevicesView.vue', import.meta.url), 'utf8');
+  const literal = /const PERMISSION_ALL = (0x[0-9a-f]+);/i.exec(view)?.[1];
+  assert.ok(literal, 'DevicesView.vue: PERMISSION_ALL not found');
+  assert.equal(Number(literal), perm._all, 'DevicesView.vue: PERMISSION_ALL');
+});
