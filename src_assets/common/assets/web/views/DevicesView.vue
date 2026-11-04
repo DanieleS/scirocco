@@ -269,7 +269,7 @@ const filteredDevices = computed(() => {
   return list;
 });
 
-const PERMISSION_ALL = 0x071f1f00;
+const PERMISSION_ALL = 0x077f1f00;
 
 function permissionMask(device: PairedDevice): number {
   const parsed = Number(device.perm ?? 0);
@@ -639,7 +639,7 @@ function updatePayload(device: PairedDevice, draft: ClientDeviceDraft): Record<s
     uuid: device.uuid,
     name: draft.name.trim(),
     allow_sleep: draft.allowSleep,
-    perm: draft.permissions & PERMISSION_ALL,
+    perm: draft.permissions,
     enable_legacy_ordering: draft.enableLegacyOrdering,
     allow_client_commands: draft.allowClientCommands,
     do: draft.doCommands.map((entry) => ({ cmd: entry.command.trim(), elevated: entry.elevated })),
