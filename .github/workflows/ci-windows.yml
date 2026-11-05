@@ -622,8 +622,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           # Pinned deliberately: this binary reads game memory, so which build
           # ships is a decision, never "whatever was latest at build time".
-          SCRY_RELEASE_TAG: v0.1.0-alpha.7
-          SCRY_SHA256: 830a8c08d99b5e7c0a2315560d52d9221edc9ba24ad5e3abc0f0cd2a7c96a280
+          SCRY_RELEASE_TAG: v0.1.0-alpha.8
+          SCRY_SHA256: 7865fe567d8e3ed430bf37fd5ee6d6564958d4bf9d301ca93198d8f3097bc015
         run: |
           $ErrorActionPreference = 'Stop'
 
