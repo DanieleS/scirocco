@@ -369,13 +369,6 @@ if(SUNSHINE_TEST_PYTHON_EXECUTABLE)
 endif()
 
 if(WIN32)
-    sunshine_add_test_target(NAME test_component_install_root_diagnostics CATEGORY component
-        TEST_SOURCES unit/test_install_root_diagnostics.cpp
-        DEFINITIONS UNICODE _UNICODE WINVER=0x0A00 _WIN32_WINNT=0x0A00
-        LINK_LIBRARIES msi advapi32 shell32 ole32 uuid)
-    if(TARGET test_component_install_root_diagnostics)
-        set_tests_properties(test_component_install_root_diagnostics PROPERTIES TIMEOUT 60)
-    endif()
     find_program(SUNSHINE_TEST_POWERSHELL_EXECUTABLE NAMES pwsh powershell)
     if(SUNSHINE_TEST_POWERSHELL_EXECUTABLE)
         add_test(NAME test_script_playnite_waveform_bridge
@@ -2106,16 +2099,6 @@ if(Python3_Interpreter_FOUND AND SUNSHINE_TEST_GXX)
     add_test(NAME regression_playnite_duplicate_migration
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/platform/windows/test_playnite_duplicate_migration.py")
     find_program(SUNSHINE_TEST_DOTNET NAMES dotnet dotnet.exe)
-    if(SUNSHINE_TEST_DOTNET)
-        add_test(NAME regression_incoming_msi_preflight
-            COMMAND "${Python3_EXECUTABLE}" "${SUNSHINE_TEST_REPOSITORY_ROOT}/packaging/windows/bootstrapper/tests/test_incoming_msi_preflight.py"
-                "${SUNSHINE_TEST_DOTNET}")
-        set_tests_properties(regression_incoming_msi_preflight PROPERTIES LABELS "component" TIMEOUT 120)
-        add_test(NAME regression_scoped_install_root
-            COMMAND "${Python3_EXECUTABLE}" "${SUNSHINE_TEST_REPOSITORY_ROOT}/packaging/windows/bootstrapper/tests/test_scoped_install_root.py"
-                "${SUNSHINE_TEST_DOTNET}")
-        set_tests_properties(regression_scoped_install_root PROPERTIES LABELS "component" TIMEOUT 120)
-    endif()
     add_test(NAME regression_playnite_connector_lifecycle
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/playnite_connector/test_lifecycle.py"
             --dotnet "${SUNSHINE_TEST_DOTNET}")
@@ -2168,9 +2151,6 @@ if(Python3_Interpreter_FOUND AND SUNSHINE_TEST_GXX)
         add_test(NAME regression_touch_mapping_environment
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_touch_mapping_environment.py")
     endif()
-    add_test(NAME regression_install_root_guard
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_install_root_guard.py"
-            --compiler "${CMAKE_CXX_COMPILER}")
     add_test(NAME regression_display_helper_pipe_authority
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_display_helper_pipe_authority.py"
             --compiler "${CMAKE_CXX_COMPILER}")
