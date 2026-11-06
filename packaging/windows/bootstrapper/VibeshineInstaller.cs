@@ -3651,15 +3651,6 @@ namespace VibepolloInstaller {
       bool installUsbIpTransport,
       bool saveInstallLogs,
       bool allowSelfElevation = true) {
-      try {
-        installDirectory = ValidateInstallRootPath(installDirectory);
-      } catch (Exception ex) {
-        return new InstallerResult {
-          Operation = InstallerOperation.Install,
-          ExitCode = 1603,
-          Message = "The install folder is not safe to use: " + ex.Message
-        };
-      }
       if (allowSelfElevation && !IsProcessElevated()) {
         return RunElevatedBootstrapperInstall(
           arguments,
@@ -5850,14 +5841,6 @@ namespace VibepolloInstaller {
       var isInstallOperation = IsMsiInstallOperation(cliArgs);
       var isUninstallOperation = IsMsiUninstallOperation(cliArgs);
       PreserveCliInstallDirectory(cliArgs);
-      string installRootFailure;
-      if (isInstallOperation && !TryNormalizeAndValidateCliInstallRoot(cliArgs, out installRootFailure)) {
-        return new InstallerResult {
-          Operation = InstallerOperation.Install,
-          ExitCode = 1603,
-          Message = installRootFailure
-        };
-      }
       if (isInstallOperation) {
         installMsiPath = GetMsiPathArgument(cliArgs) ?? string.Empty;
       }
