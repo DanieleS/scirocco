@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 #include <src/tls_client_identity_native.h>
 #include <thread>
+#include <vector>
 
 namespace {
   using namespace nvhttp;
@@ -823,5 +824,40 @@ namespace {
     EXPECT_FALSE(native_resolve(first_request));
     ASSERT_TRUE(native_resolve(second_request));
     EXPECT_EQ(native_resolve(second_request)->uuid, second_uuid);
+  }
+
+  TEST(CertChainVerify, SafeFromSeveralThreads) {
+    // cert_chain_t::verify() used one X509_STORE_CTX for every caller: one thread's cleanup freed the verification
+    // parameters another thread was about to read (null pointer in X509_VERIFY_PARAM_inherit).
+    crypto::cert_chain_t verify_chain;
+    auto record = std::make_shared<crypto::named_cert_t>();
+    record->cert = first_credentials().x509;
+    verify_chain.add(record);
+
+    auto probe = crypto::x509(first_credentials().x509);
+    ASSERT_TRUE(probe);
+
+    constexpr int threads = 8;
+    constexpr int rounds = 300;
+    std::atomic<int> failures {0};
+    std::atomic<int> wrong_record {0};
+    std::vector<std::thread> workers;
+    for (int t = 0; t < threads; ++t) {
+      workers.emplace_back([&] {
+        for (int i = 0; i < rounds; ++i) {
+          crypto::p_named_cert_t matched;
+          if (verify_chain.verify(probe.get(), matched) != nullptr) {
+            ++failures;
+          } else if (matched != record) {
+            ++wrong_record;
+          }
+        }
+      });
+    }
+    for (auto &worker : workers) {
+      worker.join();
+    }
+    EXPECT_EQ(failures.load(), 0);
+    EXPECT_EQ(wrong_record.load(), 0);
   }
 }  // namespace
