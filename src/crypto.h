@@ -170,6 +170,15 @@ namespace crypto {
     std::vector<std::pair<p_named_cert_t, x509_store_t>> _certs;
   };
 
+  /**
+   * Newer OpenSSL returns const X509_NAME * from X509_get_subject_name(), but the setters still take a mutable one.
+   * Deduced, so call sites never spell X509_NAME (wincrypt.h defines it as a macro on Windows).
+   */
+  template<class T>
+  T *mutable_ptr(const T *p) {
+    return const_cast<T *>(p);
+  }
+
   namespace cipher {
     constexpr std::size_t tag_size = 16;
 

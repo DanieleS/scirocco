@@ -404,6 +404,14 @@ namespace crypto {
     return {mem_ptr->data, mem_ptr->length};
   }
 
+  static int asn1_length(const ASN1_STRING *s) {
+#if OPENSSL_VERSION_NUMBER >= 0x40100000L
+    return ASN1_STRING_get_length(s);
+#else
+    return ASN1_STRING_length(s);
+#endif
+  }
+
   std::string_view signature(const X509 *x) {
     const ASN1_BIT_STRING *asn1 = nullptr;
     X509_get0_signature(&asn1, nullptr, x);
@@ -411,7 +419,7 @@ namespace crypto {
       return {};
     }
 
-    return {(const char *) ASN1_STRING_get0_data(asn1), (std::size_t) ASN1_STRING_length(asn1)};
+    return {(const char *) ASN1_STRING_get0_data(asn1), (std::size_t) asn1_length(asn1)};
   }
 
   std::string_view signature(const x509_t &x) {
@@ -485,7 +493,7 @@ namespace crypto {
 
     X509_set_pubkey(x509.get(), pkey.get());
 
-    auto name = const_cast<X509_NAME *>(X509_get_subject_name(x509.get()));
+    auto name = mutable_ptr(X509_get_subject_name(x509.get()));
     X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (const std::uint8_t *) cn.data(), (int) cn.size(), -1, 0);
 
     X509_set_issuer_name(x509.get(), name);
