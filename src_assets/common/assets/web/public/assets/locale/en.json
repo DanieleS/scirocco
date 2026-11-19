@@ -1224,7 +1224,8 @@
     "limit_framerate": "Limit frame rate",
     "nvenc_temporal_aq": "NVIDIA temporal adaptive quantization",
     "pacing_max_bitrate_kbps": "Pacing maximum bitrate (Kbps)",
-    "packetsize": "Network packet size"
+    "packetsize": "Network packet size",
+    "remote_pacing_ms": "Remote client pacing window (ms)"
   },
   "index": {
     "display_recovery": {
