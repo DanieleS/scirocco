@@ -50,7 +50,7 @@ namespace {
         require(ASN1_INTEGER_set(X509_get_serialNumber(certificate.get()), 1) == 1);
         require(X509_gmtime_adj(X509_getm_notBefore(certificate.get()), -60) && X509_gmtime_adj(X509_getm_notAfter(certificate.get()), 3600));
         require(X509_set_pubkey(certificate.get(), key.get()) == 1);
-        const auto subject = const_cast<X509_NAME *>(X509_get_subject_name(certificate.get()));
+        const auto subject = const_cast<struct X509_name_st *>(X509_get_subject_name(certificate.get()));
         require(X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char *>("temporary-local-test"), -1, -1, 0) == 1);
         require(X509_set_issuer_name(certificate.get(), subject) == 1 && X509_sign(certificate.get(), key.get(), EVP_sha256()) > 0);
         std::unique_ptr<BIO, decltype(&BIO_free)> cert_file(BIO_new_file((directory / "cert.pem").string().c_str(), "w"), BIO_free);
