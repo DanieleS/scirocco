@@ -3643,6 +3643,35 @@ namespace stream {
           ratecontrol_packets_in_1ms = adaptive_pace ?
             std::min(ratecontrol_packets_in_1ms, ordinary_batch_quantum_packets) : ordinary_batch_quantum_packets;
         }
+        // A remote client's frames are spread out whatever their size: the packets go out a few
+        // at a time, at the stream's own bitrate (10 to 50 Mbps), or faster for a frame that
+        // would take longer than remote_pacing_ms (a third of a frame interval at most). Links
+        // with a small allowance per flow drop the tail of a burst and the repair packets sent
+        // right behind it, and the frames lost that way were mostly small ones, which a batch
+        // of 64 packets sends in one go. The adaptive and demand-limited paces keep their own.
+        const bool remote_small_frame_pacing = remote_client_pacing && config::stream.remote_pacing_ms > 0 &&
+                                               !adaptive_pace && !ordinary_group_pace;
+        if (remote_small_frame_pacing) {
+          const auto stream_kbps = session->video.pacing_bitrate_kbps.load(std::memory_order_relaxed);
+          const std::uint64_t stream_bps = stream_kbps > 0 ? std::uint64_t(stream_kbps) * 1000 : std::uint64_t(std::max(session->config.monitor.bitrate, 0)) * 1000;
+          const auto floor_bps = std::clamp<std::uint64_t>(stream_bps, 10'000'000, 50'000'000);
+          const auto floor_packets = std::max<std::size_t>(1, floor_bps / 1000 / blocksize / 8);
+
+          double spread_ms = config::stream.remote_pacing_ms;
+          if (session->config.monitor.framerate > 0) {
+            spread_ms = std::min(spread_ms, 1000.0 / session->config.monitor.framerate / 3.0);
+          }
+          std::size_t frame_packets = total_shards;
+          frame_packets += frame_packets * fecPercentage / 100 + fec_blocks_needed * 2;
+
+          ratecontrol_packets_in_1ms = std::max<std::size_t>(floor_packets, (std::size_t) std::ceil(frame_packets / std::max(spread_ms, 1.0)));
+          if (floor_bps != logged_remote_pacing_bps) {
+            BOOST_LOG(info) << "Video pacing: remote client, a frame's packets go out over up to "sv << config::stream.remote_pacing_ms
+                            << " ms, at "sv << floor_bps / 1'000'000 << " Mbps or more ("sv << stream_bps / 1'000'000
+                            << " Mbps stream, "sv << session->config.packetsize << "-byte packets)"sv;
+            logged_remote_pacing_bps = floor_bps;
+          }
+        }
         const auto ratecontrol_pace = adaptive_pace.value_or(
           ordinary_group_pace.value_or(pacing::packet_pace_t::fixed(ratecontrol_packets_in_1ms)));
 
@@ -3672,7 +3701,11 @@ namespace stream {
 
         // Encryption adds a prefix to every datagram. Omitting it here lets a
         // nominally 64 KiB batch cross the Windows buffering threshold.
-        const auto send_batch_size = video_send_batch_size(blocksize, prefix_size, max_batch_size_bytes);
+        auto send_batch_size = video_send_batch_size(blocksize, prefix_size, max_batch_size_bytes);
+        if (remote_small_frame_pacing) {
+          // About half a millisecond's worth at a time (the timer isn't finer), 4 packets at least
+          send_batch_size = std::min<std::size_t>(send_batch_size, std::max<std::size_t>(4, (ratecontrol_packets_in_1ms + 1) / 2));
+        }
 
         const auto frame_pacing_delay = [&](std::uint64_t packets_sent) {
           auto automatic_delay = ratecontrol_pace.offset(packets_sent);
@@ -3824,8 +3857,9 @@ namespace stream {
               // Do pacing within the frame.
               // Also trigger pacing before the first send_batch() of the frame
               // to account for the last send_batch() of the previous frame.
+              // (a remote client: before every batch, which is a few packets)
               if (pacing_ceiling > 0 || ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms ||
-                  ratecontrol_frame_packets_sent == 0) {
+                  ratecontrol_frame_packets_sent == 0 || remote_small_frame_pacing) {
                 auto due = ratecontrol_frame_start + frame_pacing_delay(ratecontrol_frame_packets_sent);
 
                 auto now = std::chrono::steady_clock::now();

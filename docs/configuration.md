@@ -6239,6 +6239,10 @@ Set `0` to preserve the existing legacy/adaptive pacing behavior without this ad
 
 Sets the maximum network packet size used for streaming. Set `0` to use the default behavior.
 
+### remote_pacing_ms
+
+For a client streaming remotely (packets of 1024 bytes or less, as over a VPN or the internet), every frame's packets go out a few at a time instead of in one burst, at the stream's own bitrate (10 to 50 Mbps), or faster for a frame that would otherwise take longer than this many milliseconds. The value is also capped at a third of the frame interval. Range `0` to `12`; `0` sends each frame's packets at once, as before. LAN clients, a nonzero `pacing_max_bitrate_kbps`, `host_adaptive_pacing`, `pacing_group_demand_limit` and PyroWave keep their own pacing. Default `5`.
+
 <div class="section_buttons">
 
 | Previous          |                            Next |
