@@ -315,6 +315,10 @@ namespace config {
 
     // Limit the packetsize to avoid fragmentation on a low MTU link. 0 = off.
     int packetsize;
+
+    // A remote client (packets of 1024 bytes or less): the longest a frame's packets are
+    // spread over, in ms (0: sent at once, as before).
+    int remote_pacing_ms;
   };
 
   struct nvhttp_t {
