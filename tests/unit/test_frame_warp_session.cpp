@@ -133,7 +133,8 @@ TEST(FrameWarpSession, AControllerFiltersByTheRequestsNumber) {
   session.on_controller(0, 0, 0);
   session.on_controller(2, 0, 0);
   session.on_controller(2, 0, 0);
-  session.tag(1, session_t::clock::now());
+  // The host looks the pad up at the capture time less the stick's lag: tag past it.
+  session.tag(1, session_t::clock::now() + std::chrono::milliseconds {100});
   const auto out = session.take();
   ASSERT_FALSE(out.tags.empty());
   EXPECT_EQ(tags_t::decode(out.tags.back())->tags.back().controller_seq, 2u);
@@ -175,9 +176,12 @@ TEST(FrameWarpStore, TheLeastRecentlyUsedGamesGoPastTheLimit) {
   for (std::size_t i = 0; i < store_t::max_games + 3; ++i) {
     store_t {path, "uuid:" + std::to_string(i)}.save(sample_prior(1.0f));
   }
-  std::ifstream in {path};
-  const auto file = nlohmann::json::parse(in);
-  EXPECT_EQ(file["games"].size(), store_t::max_games);
+  {
+    // Closed before the directory goes: Windows will not remove a file that is still open.
+    std::ifstream in {path};
+    const auto file = nlohmann::json::parse(in);
+    EXPECT_EQ(file["games"].size(), store_t::max_games);
+  }
   std::filesystem::remove_all(directory);
 }
 
