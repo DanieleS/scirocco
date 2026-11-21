@@ -52,6 +52,10 @@ struct AVHWFramesContext;
 struct AVCodecContext;
 struct AVDictionary;
 
+namespace frame_warp {
+  class session_t;
+}  // namespace frame_warp
+
 namespace video {
   struct config_t;
 
@@ -656,6 +660,24 @@ namespace platf {
      */
     virtual void run_hdr_dynamic_metadata_pass(std::int64_t frame_index) {
       (void) frame_index;
+    }
+
+    /**
+     * @brief Give this device the stream's Frame Warp session: the thumbnail and HUD passes run on
+     *        the frames it converts once the client asked for Frame Warp. Nothing is created yet.
+     * @return False when the device has no such passes; the stream then cannot be measured and
+     *         the client is answered with an unlocked model.
+     */
+    virtual bool attach_frame_warp(std::shared_ptr<frame_warp::session_t> session) {
+      (void) session;
+      return false;
+    }
+
+    /**
+     * @brief Run once the encoder took the last converted frame: hand the finished Frame Warp
+     *        readbacks to the session. Never waits on the GPU.
+     */
+    virtual void run_frame_warp_pass() {
     }
   };
 

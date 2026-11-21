@@ -270,6 +270,9 @@ namespace input {
     std::vector<gamepad_t> gamepads;
     // Only the input worker owns gamepads; the control thread reads this summary.
     std::atomic_uint32_t allocated_gamepads {0};
+    // Counts the accepted mouse moves and controller packets for Frame Warp (frame_warp_input.h).
+    // Set before the context gets input, read by the control thread.
+    std::shared_ptr<frame_warp::input_sink_t> frame_warp;
     controller_speaker_pcm::owner_bindings speaker_bindings;
     std::unique_ptr<platf::client_input_t> client_context;
 
@@ -2266,6 +2269,33 @@ namespace input {
   }
 
   /**
+   * @brief Tell Frame Warp about an accepted packet: relative mouse moves and controller packets only.
+   * @param magic The packet's validated magic, so `input_data` has the size of its struct.
+   * @details A packet for a device the host's settings turned off is not counted, as the
+   *          input worker would drop it.
+   */
+  void count_frame_warp_input(frame_warp::input_sink_t &sink, std::uint32_t magic, const std::vector<std::uint8_t> &input_data) {
+    switch (magic) {
+      case MOUSE_MOVE_REL_MAGIC_GEN5:
+        if (config::input.mouse) {
+          const auto *packet = reinterpret_cast<const NV_REL_MOUSE_MOVE_PACKET *>(input_data.data());
+          sink.on_mouse(util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
+        }
+        break;
+      case MULTI_CONTROLLER_MAGIC_GEN5:
+        if (config::input.controller) {
+          const auto *packet = reinterpret_cast<const NV_MULTI_CONTROLLER_PACKET *>(input_data.data());
+          if (packet->controllerNumber >= 0 && packet->controllerNumber < platf::MAX_GAMEPADS) {
+            sink.on_controller(static_cast<std::uint16_t>(packet->controllerNumber), packet->rightStickX, packet->rightStickY);
+          }
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  /**
    * @brief Called on the control stream thread to queue an input message.
    * @param input The input context pointer.
    * @param input_data The input message.
@@ -2333,6 +2363,10 @@ namespace input {
           // Unknown input event
           return;
       }
+    }
+    // Frame Warp counts here, on the control thread, before the queue batches or injects anything.
+    if (input->frame_warp && input->frame_warp->active()) {
+      count_frame_warp_input(*input->frame_warp, packet->magic, input_data);
     }
     {
       std::lock_guard<std::mutex> lg(input->input_queue_lock);
@@ -2480,6 +2514,12 @@ namespace input {
 
   bool has_gamepad(const std::shared_ptr<input_t> &input) {
     return input && input->allocated_gamepads.load(std::memory_order_relaxed) != 0;
+  }
+
+  void set_frame_warp(const std::shared_ptr<input_t> &input, std::shared_ptr<frame_warp::input_sink_t> sink) {
+    if (input) {
+      input->frame_warp = std::move(sink);
+    }
   }
 
   std::shared_ptr<input_t> alloc(safe::mail_t mail, guide_button_config_t guide_button, bool persist_gamepads) {

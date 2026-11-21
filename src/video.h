@@ -39,6 +39,10 @@ namespace video_fec {
   class budget_t;
 }  // namespace video_fec
 
+namespace frame_warp {
+  class session_t;
+}  // namespace frame_warp
+
 namespace video {
   /**
    * @brief Encoder size of a session whose client changed the stream resolution live (0x5506).
@@ -179,6 +183,9 @@ namespace video {
     bool shared_capture_pyrowave = false;
     // Shared with the session's control stream; only set for sessions that may change size live.
     std::shared_ptr<client_resolution_target_t> client_resolution_target;
+    // Frame Warp (frame_warp_session.h), shared with the session's control stream; set only for a launch
+    // whose DESCRIBE offered it, and idle until the client asks.
+    std::shared_ptr<frame_warp::session_t> frame_warp;
     // Packed 4:4:4 (video_packed444.h): 0 - off, 1 - on. width/height stay the logical size;
     // the encoder is created at video::packed444::coded_size(width, height).
     int chroma_packing = 0;
@@ -412,6 +419,9 @@ namespace video {
 
     /// HDR10+ dynamic metadata for this session's packets; null when they carry none.
     std::shared_ptr<hdr_dynamic::stream_t> hdr_dynamic;
+
+    /// The device has the stream's Frame Warp session and its passes (attach_frame_warp).
+    bool frame_warp_attached = false;
   };
 
   // encoders

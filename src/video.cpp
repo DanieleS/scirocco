@@ -54,6 +54,7 @@ extern "C" {
 #include "video.h"
 #include "video_framerate_policy.h"
 #include "video_encoder_probe_policy.h"
+#include "frame_warp_session.h"
 #include "video_hdr_dynamic.h"
 #include "video_fec.h"
 #include "video_policy.h"
@@ -3736,6 +3737,19 @@ namespace video {
     );
   }
 
+  /**
+   * @brief Give `session`'s device the stream's Frame Warp session, and tell that session whether
+   *        this encode path can measure frames (a device without the GPU passes cannot).
+   */
+  static void attach_frame_warp(encode_session_t &session, const config_t &config) {
+    if (!config.frame_warp) {
+      return;
+    }
+    auto *device = session.encode_device();
+    session.frame_warp_attached = device && device->attach_frame_warp(config.frame_warp);
+    config.frame_warp->set_measurable(session.frame_warp_attached);
+  }
+
   int encode_avcodec(
     int64_t frame_nr,
     avcodec_encode_session_t &session,
@@ -3960,6 +3974,10 @@ namespace video {
     if (result == 0) {
       // The encoder has this frame; its statistics pass is named after it now, and never waited for.
       run_hdr_dynamic_pass(session, frame_nr);
+      // Finished Frame Warp readbacks go to its worker; none exists until the client asked.
+      if (auto *device = session.encode_device(); device && session.frame_warp_attached) {
+        device->run_frame_warp_pass();
+      }
     }
     return result;
   }
@@ -5262,6 +5280,7 @@ namespace video {
       return encode_run_result_e::initialization_failed;
     }
     attach_hdr_dynamic_metadata(*session, *session_encoder, config);
+    attach_frame_warp(*session, config);
     // One RTTI lookup for the whole session — the pointer stays valid until the
     // fail_guard teardown moves the session out after the encode loop exits.
     auto *const native_session = dynamic_cast<amf_encode_session_t *>(session.get());
@@ -6160,6 +6179,7 @@ namespace video {
       return std::nullopt;
     }
     attach_hdr_dynamic_metadata(*session, encoder, ctx.config);
+    attach_frame_warp(*session, ctx.config);
 
     // Load the initial image to prepare for encoding
     if (session->convert(img)) {
