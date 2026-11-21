@@ -2110,12 +2110,15 @@ namespace stream {
     if (!session->control.peer) {
       return -1;
     }
+    if (body.size() > frame_warp::max_mask_message_bytes) {
+      return -1;
+    }
     std::vector<std::uint8_t> plaintext(sizeof(control_header_v2) + body.size());
     control_header_v2 header {};
     header.type = type;
     header.payloadLength = static_cast<std::uint16_t>(body.size());
     std::memcpy(plaintext.data(), &header, sizeof(header));
-    std::memcpy(plaintext.data() + sizeof(header), body.data(), body.size());
+    std::copy(body.begin(), body.end(), plaintext.begin() + sizeof(header));
 
     // encode_control wants a fixed-size std::array; Frame Warp messages are at most the 48 KiB mask.
     static thread_local std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(frame_warp::max_mask_message_bytes + 4) + crypto::cipher::tag_size> buffer;

@@ -1778,7 +1778,7 @@ namespace platf::dxgi {
      *        mutex is released, so the passes read the capture texture inside the conversion's hold.
      *        A stream whose client did not ask costs one atomic load.
      */
-    void measure_frame_warp(encoder_img_ctx_t &img_ctx, const platf::img_t &img, const platf::converted_frame_t &converted_frame, bool encoder_mutex_held) {
+    void measure_frame_warp(encoder_img_ctx_t &img_ctx, const img_d3d_t &img, const platf::converted_frame_t &converted_frame, bool encoder_mutex_held) {
       // One atomic load while the client did not ask.
       if (!frame_warp_owner || !frame_warp_owner->enabled() || !frame_warp.active()) {
         return;

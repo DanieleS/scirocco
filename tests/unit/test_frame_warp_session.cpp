@@ -153,8 +153,8 @@ TEST(FrameWarpStore, APriorLoadsForTheSameGameOnly) {
   a.save(sample_prior(1.5f));
   store_t {path, ""}.save(sample_prior(9.0f));
   EXPECT_EQ(a.load(), sample_prior(1.5f));
-  EXPECT_FALSE(store_t {path, "uuid:b"}.load());
-  EXPECT_FALSE(store_t {path, ""}.load());
+  EXPECT_FALSE((store_t {path, "uuid:b"}.load()));
+  EXPECT_FALSE((store_t {path, ""}.load()));
 
   // A damaged file reads as nothing learned and is replaced by the next save.
   {
@@ -191,7 +191,7 @@ TEST(FrameWarpSession, WhatAGameTaughtStartsTheNextStream) {
     // The worker applies the prior and, when the session ends, saves what it knows.
   }
   // Still there for the next stream of the game, and never invented for another.
-  EXPECT_TRUE(store_t {path, "uuid:g"}.load());
-  EXPECT_FALSE(store_t {path, "uuid:other"}.load());
+  EXPECT_TRUE((store_t {path, "uuid:g"}.load()));
+  EXPECT_FALSE((store_t {path, "uuid:other"}.load()));
   std::filesystem::remove_all(directory);
 }
