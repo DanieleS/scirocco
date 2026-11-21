@@ -137,6 +137,7 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/webrtc_stream.h"
         "${CMAKE_SOURCE_DIR}/src/rtsp.cpp"
         "${CMAKE_SOURCE_DIR}/src/rtsp.h"
+        "${CMAKE_SOURCE_DIR}/src/rtsp_limits.h"
         "${CMAKE_SOURCE_DIR}/src/stream.cpp"
         "${CMAKE_SOURCE_DIR}/src/stream_broadcast_runtime.cpp"
         "${CMAKE_SOURCE_DIR}/src/stream_broadcast_runtime.h"
