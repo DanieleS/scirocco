@@ -53,6 +53,7 @@ extern "C" {
 #endif
 #include "hardware_metrics_session.h"
 #include "rtsp.h"
+#include "rtsp_limits.h"
 #include "rtsp_pending_policy.h"
 #include "stream.h"
 #include "sync.h"
@@ -277,7 +278,7 @@ namespace rtsp_stream {
         return;
       }
       if (begin == std::end(msg_buf) || (session->rtsp_cipher && begin + sizeof(encrypted_rtsp_header_t) >= std::end(msg_buf))) {
-        BOOST_LOG(error) << "RTSP: read(): Exceeded maximum rtsp packet size: "sv << msg_buf.size();
+        BOOST_LOG(error) << describe_oversized_rtsp_message("read()"sv, remote_address, static_cast<std::uint64_t>(begin - msg_buf.data()), msg_buf.size(), false);
 
         respond(sock, *session, nullptr, 400, "BAD REQUEST", 0, {});
 
@@ -382,7 +383,7 @@ namespace rtsp_stream {
       }
       auto header = reinterpret_cast<encrypted_rtsp_header_t *>(socket->begin);
       const auto payload_length = header->payload_length();
-      if (!header->is_encrypted() || socket->begin + sizeof(*header) + payload_length >= std::end(socket->msg_buf)) {
+      if (!header->is_encrypted() || !rtsp_message_fits(socket->msg_buf.size(), static_cast<std::size_t>(socket->begin - socket->msg_buf.data()), sizeof(*header), payload_length)) {
         BOOST_LOG(warning) << "Rejecting unbound RTSP connection without a valid encrypted header.";
         boost::system::error_code close_ec;
         socket->sock.close(close_ec);
@@ -408,7 +409,7 @@ namespace rtsp_stream {
       }
       auto header = reinterpret_cast<encrypted_rtsp_header_t *>(socket->begin);
       const auto payload_length = header->payload_length();
-      if (!header->is_encrypted() || socket->begin + sizeof(*header) + payload_length >= std::end(socket->msg_buf)) {
+      if (!header->is_encrypted() || !rtsp_message_fits(socket->msg_buf.size(), static_cast<std::size_t>(socket->begin - socket->msg_buf.data()), sizeof(*header), payload_length)) {
         BOOST_LOG(warning) << "Rejecting unbound RTSP connection without a valid encrypted header.";
         boost::system::error_code close_ec;
         socket->sock.close(close_ec);
@@ -517,9 +518,9 @@ namespace rtsp_stream {
 
       auto payload_length = header->payload_length();
 
-      // Check if we have enough space to read this message
-      if (socket->begin + sizeof(*header) + payload_length >= std::end(socket->msg_buf)) {
-        BOOST_LOG(error) << "RTSP: handle_read_encrypted_header(): Exceeded maximum rtsp packet size: "sv << socket->msg_buf.size();
+      // Check if we have enough space to read this message (the length is the peer's: it is checked without adding to it)
+      if (!rtsp_message_fits(socket->msg_buf.size(), static_cast<std::size_t>(socket->begin - socket->msg_buf.data()), sizeof(*header), payload_length)) {
+        BOOST_LOG(error) << describe_oversized_rtsp_message("handle_read_encrypted_header()"sv, socket->remote_address, std::uint64_t {sizeof(*header)} + payload_length, socket->msg_buf.size());
 
         respond(socket->sock, *socket->session, nullptr, 400, "BAD REQUEST", 0, {});
         return;
@@ -601,7 +602,7 @@ namespace rtsp_stream {
      */
     void read_plaintext_payload() {
       if (begin == std::end(msg_buf)) {
-        BOOST_LOG(error) << "RTSP: read_plaintext_payload(): Exceeded maximum rtsp packet size: "sv << msg_buf.size();
+        BOOST_LOG(error) << describe_oversized_rtsp_message("read_plaintext_payload()"sv, remote_address, static_cast<std::uint64_t>(begin - msg_buf.data()), msg_buf.size(), false);
 
         respond(sock, *session, nullptr, 400, "BAD REQUEST", 0, {});
 
@@ -748,7 +749,9 @@ namespace rtsp_stream {
 
     tcp::socket sock;
 
-    std::array<char, 2048> msg_buf;
+    std::string remote_address;
+
+    std::array<char, RTSP_MAX_MESSAGE_SIZE> msg_buf;
 
     char *crlf;
     char *begin = msg_buf.data();
@@ -833,6 +836,7 @@ namespace rtsp_stream {
       boost::system::error_code remote_ec;
       const auto remote_endpoint = socket->sock.remote_endpoint(remote_ec);
       const auto remote_address = remote_ec ? std::string {} : remote_endpoint.address().to_string();
+      socket->remote_address = remote_address;
 
       const auto candidates = launch_route_candidates(remote_address);
       if (candidates.plaintext || !candidates.encrypted.empty()) {
