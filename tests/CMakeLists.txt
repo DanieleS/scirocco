@@ -787,6 +787,23 @@ endif()
 sunshine_register_component(NAME test_component_hdr_request_policy TEST_SOURCE unit/test_hdr_request_policy.cpp)
 sunshine_register_component(NAME test_component_hdr_dynamic_metadata TEST_SOURCE unit/test_hdr_dynamic_metadata.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/hdr_dynamic_metadata.cpp")
+# Frame Warp: the wire formats, the learner (no GPU needed) and the session around it.
+set(SUNSHINE_TEST_FRAME_WARP_SOURCES
+    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/frame_warp_wire.cpp"
+    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/frame_warp_history.cpp"
+    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/frame_warp_motion.cpp"
+    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/frame_warp_lens.cpp"
+    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/frame_warp_calibrate.cpp"
+    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/frame_warp_host.cpp")
+sunshine_register_component(NAME test_component_frame_warp_wire TEST_SOURCE unit/test_frame_warp_wire.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/frame_warp_wire.cpp")
+sunshine_register_component(NAME test_component_frame_warp_core TEST_SOURCE unit/test_frame_warp_core.cpp
+    PRODUCT_SOURCES ${SUNSHINE_TEST_FRAME_WARP_SOURCES}
+    LINK_LIBRARIES nlohmann_json::nlohmann_json)
+sunshine_register_component(NAME test_component_frame_warp_session TEST_SOURCE unit/test_frame_warp_session.cpp
+    PRODUCT_SOURCES ${SUNSHINE_TEST_FRAME_WARP_SOURCES}
+                    "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/frame_warp_session.cpp"
+    LINK_LIBRARIES nlohmann_json::nlohmann_json Threads::Threads)
 if(WIN32)
     # The statistics shader and its readback ring on the WARP software rasterizer.
     sunshine_register_component(NAME test_component_hdr_stats_d3d11
@@ -795,6 +812,14 @@ if(WIN32)
                         "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/hdr_dynamic_metadata.cpp"
         LINK_LIBRARIES d3d11 d3dcompiler
         DEFINITIONS "HDR_STATS_TEST_SHADER_PATH=L\"${SUNSHINE_TEST_REPOSITORY_ROOT}/src_assets/windows/assets/shaders/directx/hdr_stats_cs.hlsl\"")
+    # The Frame Warp thumbnail and HUD passes and their readback ring on the WARP software rasterizer.
+    sunshine_register_component(NAME test_component_frame_warp_d3d11
+        TEST_SOURCE unit/platform/windows/test_frame_warp_d3d11.cpp
+        PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/frame_warp_d3d11.cpp"
+                        ${SUNSHINE_TEST_FRAME_WARP_SOURCES}
+                        "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/frame_warp_session.cpp"
+        LINK_LIBRARIES d3d11 d3dcompiler nlohmann_json::nlohmann_json Threads::Threads
+        DEFINITIONS "FRAME_WARP_TEST_SHADER_PATH=L\"${SUNSHINE_TEST_REPOSITORY_ROOT}/src_assets/windows/assets/shaders/directx/frame_warp_cs.hlsl\"")
 endif()
 sunshine_register_component(NAME test_component_single_flight TEST_SOURCE unit/test_single_flight.cpp)
 sunshine_register_component(NAME test_component_paused_app_monitor TEST_SOURCE unit/test_paused_app_monitor.cpp

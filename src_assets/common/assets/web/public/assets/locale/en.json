@@ -520,6 +520,8 @@
     "av1_mode_2": "Vibepollo will advertise support for AV1 Main 8-bit profile",
     "av1_mode_3": "Vibepollo will advertise support for AV1 Main 8-bit and 10-bit (HDR) profiles",
     "av1_mode_desc": "Allows the client to request AV1 Main 8-bit or 10-bit video streams. AV1 is more CPU-intensive to encode, so enabling this may reduce performance when using software encoding.",
+    "frame_warp": "Frame Warp",
+    "frame_warp_desc": "Lets a client that asks for it show camera turns on its next screen refresh instead of after the network round trip and the game's own delay. For each game the host learns how far the picture moves per mouse count or stick movement, and which parts of it (the HUD) stay put. The host does this only for a client that asks, and learns only while the camera turns in a game with a free camera. A client that does not know Frame Warp is unaffected. Not used with PyroWave streams. Applies to streams started after the change.",
     "experimental_packed_444": "Experimental Full Chroma (Packed 4:4:4)",
     "experimental_packed_444_desc": "Offer full chroma resolution (sharper text and UI edges) to clients that can rebuild it: the 4:4:4 picture is packed into a 4:2:0 HEVC or AV1 frame and rebuilt on the client GPU, so it works with decoders that only handle 4:2:0. The coded frame has twice the pixels, which doubles the encoding and decoding work. Only the NVIDIA NVENC encoder offers it; RTX HDR is not applied to such streams. Clients that don't know it are unaffected. Applies to streams started after the change.",
     "pyrowave": "PyroWave Support",

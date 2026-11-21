@@ -1008,6 +1008,7 @@ export const settingsCategories: SettingsCategory[] = [
           boolean('pyrowave', { platform: ['windows', 'linux'] }),
           boolean('hdr_dynamic_metadata', { platform: 'windows' }),
           boolean('experimental_packed_444', { platform: 'windows' }),
+          boolean('frame_warp', { platform: 'windows' }),
         ],
       },
       {
@@ -1327,6 +1328,7 @@ export const settingsDefaults: Record<string, unknown> = {
   pyrowave: true,
   hdr_dynamic_metadata: false,
   experimental_packed_444: false,
+  frame_warp: true,
   max_bitrate: 0,
   minimum_fps_target: 20,
   input_activity_boost: false,

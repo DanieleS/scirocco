@@ -43,6 +43,7 @@ extern "C" {
 // local includes
 #include "capture_action.h"
 #include "client_roaming.h"
+#include "frame_warp_session.h"
 #include "config.h"
 #include "control_peer_timeout.h"
 #include "crypto.h"
@@ -126,6 +127,10 @@ extern "C" {
 #define IDX_STEAM_SETTINGS 20
 #define IDX_DYNAMIC_PARAM_CHANGE 21
 #define IDX_RESOLUTION_CHANGE 22
+#define IDX_FRAME_WARP_REQUEST 23
+#define IDX_FRAME_WARP_MODEL 24
+#define IDX_FRAME_WARP_TAGS 25
+#define IDX_FRAME_WARP_MASK 26
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -151,6 +156,10 @@ static const short packetTypes[] = {
   STEAM_SETTINGS_PACKET_TYPE,  // 0x5505: Steam Controller settings write (Vibepollo protocol extension)
   0x5506,  // Dynamic parameter change, client to host (Sunshine protocol extension)
   0x5507,  // Resolution change, host to client (Sunshine protocol extension)
+  frame_warp::request_type,  // 0x5543: Frame Warp request, client to host (Rubylight protocol extension)
+  frame_warp::model_type,  // 0x5544: Frame Warp model, host to client
+  frame_warp::tags_type,  // 0x5545: Frame Warp tags, host to client (unreliable)
+  frame_warp::mask_type,  // 0x5546: Frame Warp HUD mask, host to client
 };
 
 // Dynamic parameter types of IDX_DYNAMIC_PARAM_CHANGE; only the resolution is handled here
@@ -791,8 +800,10 @@ namespace stream {
       _map_type_cb.emplace(type, std::move(cb));
     }
 
-    int send(const std::string_view &payload, net::peer_t peer, bool haptics = false) {
-      auto packet = enet_packet_create(payload.data(), payload.size(), haptics ? 0 : ENET_PACKET_FLAG_RELIABLE);
+    int send(const std::string_view &payload, net::peer_t peer, bool haptics = false, bool unsequenced = false) {
+      // Haptics go unreliable on their own channel; Frame Warp tags unreliable and unsequenced on channel 0.
+      const enet_uint32 flags = unsequenced ? ENET_PACKET_FLAG_UNSEQUENCED : (haptics ? 0 : ENET_PACKET_FLAG_RELIABLE);
+      auto packet = enet_packet_create(payload.data(), payload.size(), flags);
       if (!packet) return -1;
       if (enet_peer_send(peer, haptics ? ML_HAPTICS_CHANNEL : 0, packet)) {
         enet_packet_destroy(packet);
@@ -880,6 +891,9 @@ namespace stream {
     safe::mail_t mail;
 
     std::shared_ptr<input::input_t> input;
+
+    /// Frame Warp, for a launch whose DESCRIBE offered it; null otherwise. Idle until the client asks.
+    std::shared_ptr<frame_warp::session_t> frame_warp;
 
     std::thread audioThread;
     std::thread videoThread;
@@ -2087,6 +2101,49 @@ namespace stream {
     return 0;
   }
 
+  /**
+   * @brief Send one Frame Warp message (type `type`, `body` its payload) on the control stream.
+   * @details Control thread only: ENet and the session's encryption counter belong to it. Models
+   *          and masks go reliable; tags unreliable and unsequenced.
+   */
+  static int send_frame_warp(session_t *session, std::uint16_t type, std::span<const std::uint8_t> body, bool unreliable) {
+    if (!session->control.peer) {
+      return -1;
+    }
+    std::vector<std::uint8_t> plaintext(sizeof(control_header_v2) + body.size());
+    control_header_v2 header {};
+    header.type = type;
+    header.payloadLength = static_cast<std::uint16_t>(body.size());
+    std::memcpy(plaintext.data(), &header, sizeof(header));
+    std::memcpy(plaintext.data() + sizeof(header), body.data(), body.size());
+
+    // encode_control wants a fixed-size std::array; Frame Warp messages are at most the 48 KiB mask.
+    static thread_local std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(frame_warp::max_mask_message_bytes + 4) + crypto::cipher::tag_size> buffer;
+    if (plaintext.size() > frame_warp::max_mask_message_bytes + 4) {
+      return -1;
+    }
+    auto payload = encode_control(session, std::string_view {reinterpret_cast<const char *>(plaintext.data()), plaintext.size()}, buffer);
+    if (payload.empty()) {
+      return -1;
+    }
+    return session->broadcast_ref->control_server.send(payload, session->control.peer, false, unreliable);
+  }
+
+  /// Everything Frame Warp has for this session, sent. Control thread only.
+  static void send_frame_warp_outbox(session_t *session) {
+    auto outbox = session->frame_warp->take();
+    if (outbox.model && send_frame_warp(session, frame_warp::model_type, *outbox.model, false)) {
+      BOOST_LOG(warning) << "Couldn't send the Frame Warp model"sv;
+    }
+    if (outbox.mask && send_frame_warp(session, frame_warp::mask_type, *outbox.mask, false)) {
+      BOOST_LOG(warning) << "Couldn't send the Frame Warp HUD mask"sv;
+    }
+    for (const auto &tags : outbox.tags) {
+      // A lost tags message costs nothing: the next one carries the three before it.
+      (void) send_frame_warp(session, frame_warp::tags_type, tags, true);
+    }
+  }
+
 #ifdef _WIN32
   // The display request the launch built, for another size. The launch's own override (a client-chosen host
   // display size) is replaced too, as the display only follows this stream 1:1.
@@ -2469,6 +2526,25 @@ namespace stream {
       );
     });
 
+    // Frame Warp request (frame_warp_wire.h). Only a launch whose DESCRIBE offered it has a session,
+    // and only over the encrypted control stream; anything else is ignored.
+    server->map(packetTypes[IDX_FRAME_WARP_REQUEST], [](session_t *session, const std::string_view &payload) {
+      static std::atomic_bool logged_unoffered {false};
+      if (!session->frame_warp || !(session->config.encryptionFlagsEnabled & SS_ENC_CONTROL_V2)) {
+        if (!logged_unoffered.exchange(true)) {
+          BOOST_LOG(debug) << "Ignoring a Frame Warp request: it was not offered to this session"sv;
+        }
+        return;
+      }
+      const auto on = session->frame_warp->on_request({reinterpret_cast<const std::uint8_t *>(payload.data()), payload.size()});
+      if (!on) {
+        BOOST_LOG(debug) << "Ignoring a malformed Frame Warp request ("sv << payload.size() << " bytes)"sv;
+        return;
+      }
+      BOOST_LOG(info) << "Frame Warp "sv << (*on ? "requested"sv : "stopped"sv) << " by the client"sv;
+      send_frame_warp_outbox(session);
+    });
+
     server->map(packetTypes[IDX_INVALIDATE_REF_FRAMES], [&](session_t *session, const std::string_view &payload) {
       const auto first_frame = util::packet::read_i64_le(payload, 0);
       const auto last_frame = util::packet::read_i64_le(payload, sizeof(std::int64_t));
@@ -2760,6 +2836,7 @@ namespace stream {
       const bool game_runtime_active = proc::proc.current_app_id() > 0;
       bool has_processless_live_session = false;
       bool haptics_client = false;
+      bool frame_warp_client = false;
       bool has_game_session_pending_or_draining = false;
 
       {
@@ -2897,6 +2974,16 @@ namespace stream {
               }
             }
 
+            // Frame Warp's models, masks and tags: only this thread talks to ENet.
+            if (session->frame_warp) {
+              if (session->frame_warp->enabled()) {
+                frame_warp_client = true;
+              }
+              if (session->frame_warp->pending()) {
+                send_frame_warp_outbox(session);
+              }
+            }
+
             // The sample period (500 ms) is longer than this loop's ENet wait.
             tick_adaptive_pacing(session, now);
 
@@ -2933,7 +3020,8 @@ namespace stream {
 
       // Haptic samples and gamepad feedback must keep flowing even when the player
       // is not moving.
-      server->iterate(haptics_client ? 5ms : 150ms);
+      // A Frame Warp tag is worth sending before its frame arrives, so a session using it waits 1 ms.
+      server->iterate(frame_warp_client ? 1ms : (haptics_client ? 5ms : 150ms));
     }
 
     // Let all remaining connections know the server is shutting down
@@ -3229,6 +3317,13 @@ namespace stream {
         continue;
       }
       const auto packet_pop_timestamp = std::chrono::steady_clock::now();
+      // Frame Warp: this frame's tag, the input it reflects as of its capture. One atomic load for a
+      // session that did not ask; the control thread sends what this queues.
+      if (session->frame_warp && session->frame_warp->enabled()) {
+        if (const auto captured = packet->capture_timestamp ? packet->capture_timestamp : packet->frame_timestamp) {
+          session->frame_warp->tag(static_cast<std::uint32_t>(packet->frame_index()), *captured);
+        }
+      }
       auto wire_state_it = wire_timeline_by_session.find(session);
       if (wire_state_it == wire_timeline_by_session.end()) {
         // Bound diagnostic state even if many sessions are created during one
@@ -5082,6 +5177,7 @@ namespace stream {
 
     int start(session_t &session, const std::string &addr_string) {
       session.input = input::alloc(session.mail, session.config.guide_button, session.config.gcpersist);
+      input::set_frame_warp(session.input, session.frame_warp);
       input::update_guide_button_permissions(session.input, session.permission);
 
       const auto &monitor = session.config.monitor;
@@ -5438,6 +5534,30 @@ namespace stream {
           display_helper_integration::helpers::make_display_request_session_snapshot(launch_session)
         );
 #endif
+      }
+      // Frame Warp: only a launch whose DESCRIBE offered it gets a session, which stays idle (no thread,
+      // no GPU resource) until the client's request. What the game taught the host before starts it.
+      if (launch_session.frame_warp_offered) {
+        std::string game_uuid;
+        std::string game_name;
+        if (const auto app = proc::proc.resolve_app(launch_session.appid)) {
+          game_uuid = app->uuid;
+          game_name = app->name;
+        }
+        session->frame_warp = std::make_shared<frame_warp::session_t>(frame_warp::store_t {
+          platf::appdata() / std::string {frame_warp::store_t::file_name},
+          frame_warp::store_t::key_for(game_uuid, game_name)
+        });
+        session->frame_warp->set_observer([](std::string line) {
+          BOOST_LOG(info) << line;
+        });
+        // The size the model's gains are for, until the capture says how it sits in it.
+        {
+          const auto width = static_cast<std::uint16_t>(std::clamp(session->config.monitor.width, 1, 65535));
+          const auto height = static_cast<std::uint16_t>(std::clamp(session->config.monitor.height, 1, 65535));
+          session->frame_warp->set_picture(width, height, frame_warp::rect_t {0, 0, width, height});
+        }
+        session->config.monitor.frame_warp = session->frame_warp;
       }
       const auto capture_plan = remote_session::capture_plan(
         session->input_only ? remote_session::role_e::input : launch_session.role,

@@ -14,6 +14,7 @@
 
 // local includes
 #include "crypto.h"
+#include "frame_warp_input.h"
 #include "input_session_config.h"
 #include "platform/common.h"
 #include "thread_safe.h"
@@ -51,6 +52,13 @@ namespace input {
   bool probe_gamepads();
 
   std::shared_ptr<input_t> alloc(safe::mail_t mail, guide_button_config_t guide_button, bool persist_gamepads = false);
+
+  /**
+   * @brief Count this context's accepted relative mouse moves and controller packets for Frame Warp.
+   * @details Call before the context receives input (right after alloc()): the control thread reads
+   *          the sink without a lock.
+   */
+  void set_frame_warp(const std::shared_ptr<input_t> &input, std::shared_ptr<frame_warp::input_sink_t> sink);
 
   /**
    * @brief Whether any gamepad slot of this input context is currently allocated.

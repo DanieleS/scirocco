@@ -25,6 +25,7 @@ extern "C" {
 // lib includes
 #include "display.h"
 #include "display_vram.h"
+#include "frame_warp_d3d11.h"
 #include "hdr_stats_d3d11.h"
 #include "ipc/ipc_session.h"
 #include "misc.h"
@@ -615,6 +616,7 @@ namespace platf::dxgi {
 
       if (img.blank) {
         hdr_stats.converted_unmeasured();
+        frame_warp.converted_unmeasured();
         const bool cleared = clear_output_to_black();
         if (dynamic_output_textures) {
           unbind_render_targets();
@@ -907,6 +909,7 @@ namespace platf::dxgi {
       }
 #endif
       measure_hdr_stats(img_ctx, encode_input_res, encode_input_format, encode_input_sdr_to_pq, encode_input_truehdr_peak_expand, encoder_mutex_held);
+      measure_frame_warp(img_ctx, img, converted, encoder_mutex_held);
       if (dynamic_output_textures) {
         unbind_render_targets();
       }
@@ -1755,6 +1758,74 @@ namespace platf::dxgi {
       }
     }
 
+    bool attach_frame_warp(std::shared_ptr<::frame_warp::session_t> session) {
+      frame_warp_owner = session;
+      if (const auto reason = frame_warp.attach(device.get(), std::move(session))) {
+        BOOST_LOG(warning) << "Frame Warp cannot measure this stream: "sv << *reason;
+        return false;
+      }
+      return true;
+    }
+
+    void run_frame_warp_pass() {
+      if (const auto reason = frame_warp.submitted(device_ctx.get())) {
+        BOOST_LOG(warning) << "Frame Warp stopped measuring the picture on this device: "sv << *reason;
+      }
+    }
+
+    /**
+     * @brief Hand the capture the conversion just read to Frame Warp's passes. Called before the keyed
+     *        mutex is released, so the passes read the capture texture inside the conversion's hold.
+     *        A stream whose client did not ask costs one atomic load.
+     */
+    void measure_frame_warp(encoder_img_ctx_t &img_ctx, const platf::img_t &img, const platf::converted_frame_t &converted_frame, bool encoder_mutex_held) {
+      // One atomic load while the client did not ask.
+      if (!frame_warp_owner || !frame_warp_owner->enabled() || !frame_warp.active()) {
+        return;
+      }
+      if (!encoder_mutex_held || !img_ctx.encoder_input_res) {
+        frame_warp.converted_unmeasured();
+        return;
+      }
+      Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+      img_ctx.encoder_input_res->GetResource(&resource);
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+      if (!resource || FAILED(resource.As(&texture))) {
+        frame_warp.converted_unmeasured();
+        return;
+      }
+      D3D11_TEXTURE2D_DESC desc {};
+      texture->GetDesc(&desc);
+
+      frame_warp_d3d11_t::source_t source;
+      source.view = img_ctx.encoder_input_res.get();
+      source.width = desc.Width;
+      source.height = desc.Height;
+      if (img.format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        source.transfer = frame_warp_d3d11_t::transfer_e::scrgb;
+      } else {
+        source.transfer = frame_warp_d3d11_t::transfer_e::encoded;
+      }
+
+      // Where the capture shows in the encoded picture: the conversion letterboxes it.
+      if (frame_warp_owner) {
+        const auto &session = frame_warp_owner;
+        const auto &picture = out_Y_or_YUV_viewports_for_clear[0];
+        const auto &shown = out_Y_or_YUV_viewports[0];
+        session->set_picture(
+          static_cast<std::uint16_t>(std::lround(picture.Width)),
+          static_cast<std::uint16_t>(std::lround(picture.Height)),
+          ::frame_warp::rect_t {
+            static_cast<std::uint16_t>(std::lround(shown.TopLeftX)),
+            static_cast<std::uint16_t>(std::lround(shown.TopLeftY)),
+            static_cast<std::uint16_t>(std::lround(shown.Width)),
+            static_cast<std::uint16_t>(std::lround(shown.Height)),
+          }
+        );
+      }
+      frame_warp.converted(device_ctx.get(), source, converted_frame.frame_timestamp ? converted_frame.frame_timestamp : img.frame_timestamp);
+    }
+
     /**
      * @brief Hand what the conversion just read to the HDR10+ statistics pass, with the
      *        transfer function the conversion applied. Called before the keyed mutex is
@@ -2118,6 +2189,11 @@ namespace platf::dxgi {
     // the shader and pass on this device.
     hdr_stats_session_t hdr_stats {std::filesystem::path {utf_utils::from_utf8(SUNSHINE_SHADERS_DIR "/hdr_stats_cs.hlsl")}};
 
+    // Frame Warp: idle until a stream is attached and its client asked, which makes the shader and
+    // passes on this device.
+    frame_warp_session_t frame_warp {std::filesystem::path {utf_utils::from_utf8(SUNSHINE_SHADERS_DIR "/frame_warp_cs.hlsl")}};
+    std::shared_ptr<::frame_warp::session_t> frame_warp_owner;
+
     // NOTE: `display` is intentionally declared near the top of this member list (not here) so it is
     // destroyed last. See the comment on its declaration above.
 
@@ -2199,6 +2275,14 @@ namespace platf::dxgi {
 
     void run_hdr_dynamic_metadata_pass(std::int64_t frame_index) override {
       base.run_hdr_dynamic_metadata_pass(frame_index);
+    }
+
+    bool attach_frame_warp(std::shared_ptr<::frame_warp::session_t> session) override {
+      return base.attach_frame_warp(std::move(session));
+    }
+
+    void run_frame_warp_pass() override {
+      base.run_frame_warp_pass();
     }
 
     void apply_colorspace() override {
@@ -2356,6 +2440,14 @@ namespace platf::dxgi {
 
     void run_hdr_dynamic_metadata_pass(std::int64_t frame_index) override {
       base.run_hdr_dynamic_metadata_pass(frame_index);
+    }
+
+    bool attach_frame_warp(std::shared_ptr<::frame_warp::session_t> session) override {
+      return base.attach_frame_warp(std::move(session));
+    }
+
+    void run_frame_warp_pass() override {
+      base.run_frame_warp_pass();
     }
 
   private:
@@ -2607,6 +2699,14 @@ namespace platf::dxgi {
 
     void run_hdr_dynamic_metadata_pass(std::int64_t frame_index) override {
       base.run_hdr_dynamic_metadata_pass(frame_index);
+    }
+
+    bool attach_frame_warp(std::shared_ptr<::frame_warp::session_t> session) override {
+      return base.attach_frame_warp(std::move(session));
+    }
+
+    void run_frame_warp_pass() override {
+      base.run_frame_warp_pass();
     }
 
   private:
