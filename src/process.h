@@ -27,6 +27,7 @@
 
 // local includes
 #include "config.h"
+#include "generated_cover.h"
 #include "platform/common.h"
 #include "rtsp.h"
 #include "steam_process_tracker.h"
@@ -260,6 +261,16 @@ namespace proc {
   std::optional<std::string> read_configured_app_image(const std::string &image_path);
   std::string configured_app_image_version(const ctx_t &app);
   std::string calculate_app_cover_fingerprint(std::string app_image_path);
+  /**
+   * @brief Art fingerprint of an app: the one of its picture, or, for an app that shows the placeholder, the key of the cover the host draws for it.
+   * Clients keep art by this version, so an app that goes from the placeholder to a generated cover (or whose style or name changes) is fetched again.
+   */
+  std::string calculate_app_cover_fingerprint(const ctx_t &app);
+  /**
+   * @brief The cover the host draws for an app without a picture of its own, rendered (or found in the cache) at 600x900 or 1920x1080.
+   * @return Nothing when the app has a picture, keeps the Xbox art, or the host cannot draw (not Windows).
+   */
+  std::optional<generated_cover::asset_t> generated_app_cover(const ctx_t &app, generated_cover::orientation_e orientation);
   void refresh(const std::string &file_name, bool needs_terminate = true);
   void migrate_apps(nlohmann::json *fileTree_p, nlohmann::json *inputTree_p);
   std::optional<proc::proc_t> parse(const std::string &file_name);

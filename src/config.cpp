@@ -1032,6 +1032,7 @@ namespace config {
     "sunshine_state.json"s,  // file_state
     "vibeshine_state.json"s,  // vibeshine_file_state
     {},  // external_ip
+    "tonal"s,  // generated_cover_style
   };
 
   input_t input {
@@ -2214,6 +2215,12 @@ namespace config {
     path_f(vars, "pkey", nvhttp.pkey);
     path_f(vars, "cert", nvhttp.cert);
     string_f(vars, "sunshine_name", nvhttp.sunshine_name);
+    string_f(vars, "generated_cover_style", nvhttp.generated_cover_style);
+    boost::algorithm::trim(nvhttp.generated_cover_style);
+    if (const auto &style = nvhttp.generated_cover_style; style != "tonal" && style != "monogram" && style != "icon" && style != "editorial" && style != "glass" && style != "geometric") {
+      BOOST_LOG(warning) << "Invalid generated_cover_style: [" << style << "] defaulting to tonal";
+      nvhttp.generated_cover_style = "tonal";
+    }
     path_f(vars, "log_path", config::sunshine.log_file);
     path_f(vars, "file_state", nvhttp.file_state);
     path_f(vars, "vibeshine_file_state", nvhttp.vibeshine_file_state);

@@ -331,6 +331,9 @@ namespace config {
     std::string vibeshine_file_state;
 
     std::string external_ip;
+
+    /// Style of the covers the host draws for apps without a picture: tonal|monogram|icon|editorial|glass|geometric.
+    std::string generated_cover_style;
   };
 
   struct input_t {

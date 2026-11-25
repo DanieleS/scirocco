@@ -4062,6 +4062,45 @@ namespace proc {
     return "path:" + file_path;
   }
 
+  namespace {
+    /// The app as the cover generator sees it: the Xbox entry is told by its command, the placeholder is the host's own assets/box.png.
+    generated_cover::app_t cover_app(const ctx_t &app) {
+      return generated_cover::app_t {
+        .id = app.id,
+        .name = app.name,
+        .image_path = app.image_path,
+        .poster_path = validate_app_image_path(app.image_path),
+        .command = app.cmd,
+        .working_dir = app.working_dir,
+        .detached = app.detached,
+        .placeholder_path = DEFAULT_APP_IMAGE_PATH,
+        .xbox_app = boost::to_lower_copy(app.cmd).find("start xbox:") != std::string::npos,
+      };
+    }
+  }  // namespace
+
+  std::string calculate_app_cover_fingerprint(const ctx_t &app) {
+    auto fingerprint = calculate_app_cover_fingerprint(app.image_path);
+    if (fingerprint != "default") {
+      return fingerprint;
+    }
+    // art_fact is empty where the host draws nothing (not Windows) or the app keeps the Xbox art: the art is then the placeholder, as before
+    const auto fact = generated_cover::art_fact(cover_app(app), config::nvhttp.generated_cover_style);
+    return fact.empty() ? fingerprint : "generated:" + fact;
+  }
+
+  std::optional<generated_cover::asset_t> generated_app_cover(const ctx_t &app, generated_cover::orientation_e orientation) {
+    const auto cover = cover_app(app);
+    if (!generated_cover::shows_placeholder(cover)) {
+      return std::nullopt;
+    }
+    auto asset = generated_cover::preview(cover, generated_cover::effective_style(cover, config::nvhttp.generated_cover_style), orientation, platf::appdata());
+    if (asset.path.empty()) {
+      return std::nullopt;
+    }
+    return asset;
+  }
+
   std::map<std::string, app_id_alias_state_t> load_app_id_alias_state() {
     std::map<std::string, app_id_alias_state_t> result;
 
@@ -4185,7 +4224,7 @@ namespace proc {
         identity.legacy_image_identity = calculate_sha256(validated).value_or(validated);
       }
     } else {
-      identity.art_version = calculate_app_cover_fingerprint(ctx.image_path);
+      identity.art_version = calculate_app_cover_fingerprint(ctx);
     }
     catalog::assign_compatible_id(identity, index, ids, alias_state, active_uuids, alias_state_changed);
     ctx.id = std::move(identity.id);
@@ -4872,6 +4911,10 @@ namespace proc {
           ctx.lossless_scaling_target_fps.reset();
           ctx.lossless_scaling_rtss_limit.reset();
         }
+
+        // The art version of an app on the placeholder is the generated cover's key, which is made of the name and the program.
+        ctx.name = name;
+        ctx.detached = detached;
 
         // Calculate a unique application id.
         assign_compatible_app_id(ctx, name, json_index, ids, app_id_alias_state, active_app_uuids, app_id_alias_state_changed);

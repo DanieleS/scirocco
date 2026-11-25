@@ -1019,6 +1019,8 @@
     "stream_audio_desc": "Whether to stream audio or not. Disabling this can be useful for streaming headless displays as second monitors.",
     "sunshine_name": "Vibepollo Name",
     "sunshine_name_desc": "The name displayed by Moonlight. If not specified, the PC's hostname is used",
+    "generated_cover_style": "Generated Cover Style",
+    "generated_cover_style_desc": "Style of the cover drawn by the host (Windows only) for apps without a picture. Values: tonal, monogram, icon, editorial, glass, geometric.",
     "sw_preset": "SW Presets",
     "sw_preset_desc": "Optimize the trade-off between encoding speed (encoded frames per second) and compression efficiency (quality per bit in the bitstream). Defaults to superfast.",
     "sw_preset_fast": "fast",

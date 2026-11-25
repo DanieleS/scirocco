@@ -349,9 +349,11 @@ list(PREPEND PLATFORM_LIBRARIES
         advapi32
         avrt
         cfgmgr32
+        d2d1
         d3d11
         D3DCompiler
         dwmapi
+        dwrite
         dxgi
         iphlpapi
         ksuser

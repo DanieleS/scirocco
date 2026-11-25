@@ -167,6 +167,30 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### generated_cover_style
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Style of the cover the host draws (Windows only) for apps that have no picture of their own, shown by clients in place of the placeholder.
+            The cover carries the app's name and a colour taken from it: the same name gives the same image on every machine.
+            Apps with their own picture, and the Xbox entry, are not changed. The style is read when the app list is loaded.
+            Values: tonal, monogram, icon, editorial, glass, geometric.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">tonal</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            generated_cover_style = glass
+            @endcode</td>
+    </tr>
+</table>
+
 ### min_log_level
 
 <table>
