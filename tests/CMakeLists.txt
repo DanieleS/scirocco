@@ -836,6 +836,13 @@ sunshine_register_component(NAME test_component_igdb_policy TEST_SOURCE unit/tes
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/igdb_policy.cpp"
                     "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/game_metadata.cpp"
     LINK_LIBRARIES nlohmann_json::nlohmann_json)
+set(GENERATED_COVER_TEST_LIBRARIES OpenSSL::Crypto)
+if(WIN32)
+    list(APPEND GENERATED_COVER_TEST_LIBRARIES d2d1 dwrite windowscodecs ole32 shell32 uuid)
+endif()
+sunshine_register_component(NAME test_component_generated_cover TEST_SOURCE unit/test_generated_cover.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/generated_cover.cpp"
+    LINK_LIBRARIES ${GENERATED_COVER_TEST_LIBRARIES})
 set(STEAM_DISCOVERY_TEST_LIBRARIES "")
 if(WIN32)
     set(STEAM_DISCOVERY_TEST_LIBRARIES advapi32 shell32 wtsapi32)

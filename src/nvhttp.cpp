@@ -6941,11 +6941,15 @@ launch_session->exact_target_hold.reset();
     auto app_ctx = synthetic_control == remote_session::control_e::none ?
       proc::proc.resolve_app(appid, appuuid) : std::nullopt;
     std::string app_image;
+    // The configured app whose art this is: when it has no picture of its own, the host draws it a cover (600x900, or 1920x1080 for type=hero).
+    std::optional<proc::ctx_t> cover_ctx;
     if (app_ctx) {
       app_image = proc::validate_app_image_path(app_ctx->image_path);
+      cover_ctx = app_ctx;
     } else if (synthetic_control == remote_session::control_e::running_game) {
       if (const auto running_app = proc::proc.resolve_app(current_appid)) {
         app_image = proc::validate_app_image_path(running_app->image_path);
+        cover_ctx = running_app;
       }
     } else if (const auto artwork = remote_session::synthetic_artwork_filename(synthetic_control)) {
       app_image = (fs::path {SUNSHINE_ASSETS_DIR} / "remote-session" / std::string {*artwork}).string();
@@ -6954,6 +6958,21 @@ launch_session->exact_target_hold.reset();
     }
 
     fg.disable();
+
+    if (cover_ctx) {
+      const auto orientation = get_arg(args, "type", "poster") == "hero" ? generated_cover::orientation_e::landscape : generated_cover::orientation_e::portrait;
+      if (const auto cover = proc::generated_app_cover(*cover_ctx, orientation)) {
+        std::ifstream file(cover->path, std::ios::binary);
+        std::string bytes {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+        if (!bytes.empty()) {
+          SimpleWeb::CaseInsensitiveMultimap cover_headers;
+          cover_headers.emplace("Content-Type", cover->content_type.empty() ? "image/png" : cover->content_type);
+          response->write(SimpleWeb::StatusCode::success_ok, bytes, cover_headers);
+          response->close_connection_after_response = true;
+          return;
+        }
+      }
+    }
 
     auto image = proc::read_validated_app_image(app_image);
     if (!image) image = proc::read_validated_app_image(DEFAULT_APP_IMAGE_PATH);
