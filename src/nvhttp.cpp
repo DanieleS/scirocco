@@ -3764,13 +3764,10 @@ namespace nvhttp {
       bool same_hash = hash.size() == sess.clienthash.size() && std::equal(hash.begin(), hash.end(), sess.clienthash.begin());
       auto verify = crypto::verify256(crypto::x509(client.cert), secret, sign);
       if (same_hash && verify) {
+        // A reserved placeholder name ("self") is replaced below by a usable one.
+        // Refusing here after answering paired=1 made the client believe it was
+        // paired while the host never stored its certificate.
         tree.put("root.paired", 1);
-
-        if (is_placeholder_client_name(client.name)) {
-          BOOST_LOG(warning) << "PIN submitted with reserved client name '" << client.name << "'; refusing to pair with placeholder identity.";
-          remove_session(sess);
-          return;
-        }
 
         auto named_cert_p = std::make_shared<crypto::named_cert_t>();
         named_cert_p->name = display_client_name_for_session(client.name, std::string {}, "Moonlight Client"s);
