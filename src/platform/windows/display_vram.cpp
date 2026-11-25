@@ -102,6 +102,12 @@ namespace platf::dxgi {
     float padding[3];
   };
 
+  /// Layout of cbuffer b1 in convert_linear_base.hlsl.
+  struct alignas(16) sdr_output_params_t {
+    uint32_t primaries;  ///< H.273 colour_primaries of the SDR stream
+    uint32_t padding[3];
+  };
+
 #ifdef SUNSHINE_ENABLE_NV_TRUEHDR
   struct alignas(16) truehdr_peak_params_t {
     float luminance_scale;
@@ -536,6 +542,10 @@ namespace platf::dxgi {
       auto draw = [&](auto &input, auto &y_or_yuv_viewports, auto &uv_viewport, DXGI_FORMAT input_format, bool sdr_to_pq, bool truehdr_peak_expand) {
         device_ctx->PSSetShaderResources(0, 1, &input);
         ID3D11Buffer *conversion_params_buffer = sdr_to_pq ? sdr_to_pq_params.get() : nullptr;
+        if (input_format == DXGI_FORMAT_R16G16B16A16_FLOAT && sdr_output_params) {
+          // FP16 capture on an SDR stream is an HDR desktop: its linear shader reads b1.
+          conversion_params_buffer = sdr_output_params.get();
+        }
 #ifdef SUNSHINE_ENABLE_NV_TRUEHDR
         if (truehdr_peak_expand) {
           conversion_params_buffer = truehdr_peak_params.get();
@@ -1119,6 +1129,19 @@ namespace platf::dxgi {
       truehdr_output_hdr = ::video::colorspace_is_hdr(colorspace);
       truehdr_output_full_range = colorspace.full_range;
 #endif
+      // Tell the linear shaders which primaries an SDR stream negotiated, so an HDR
+      // desktop is tone mapped (BT.2446 Method B) instead of clipped at 80 nits.
+      sdr_output_params.reset();
+      if (!::video::colorspace_is_hdr(colorspace)) {
+        const auto primaries = static_cast<uint32_t>(::video::avcodec_colorspace_from_sunshine_colorspace(colorspace).primaries);
+        sdr_output_params_t params {primaries, {}};
+        if (auto buffer = make_buffer(device.get(), params)) {
+          sdr_output_params = std::move(buffer);
+        } else {
+          BOOST_LOG(warning) << "Failed to create SDR output parameter buffer; HDR desktop will be clipped to SDR"sv;
+        }
+      }
+
       auto color_vectors = ::video::color_vectors_from_colorspace(colorspace, true);
 
       if (format == DXGI_FORMAT_AYUV ||
@@ -2090,6 +2113,7 @@ namespace platf::dxgi {
     buf_t color_matrix;
     buf_t sdr_to_pq_params;
     float sdr_to_pq_white_nits = 100.0f;
+    buf_t sdr_output_params;  ///< Selects the BT.2446 Method B tone map for FP16 input on an SDR stream
 
     buf_t packed444_params;
     bool packed444 = false;  ///< Packed 4:4:4 in a 4:2:0 frame (video_packed444.h), NV12/P010 only.
