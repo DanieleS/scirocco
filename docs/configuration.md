@@ -3629,6 +3629,40 @@ PyroWave is unchanged. Example: `pacing_group_demand_limit = true`.
     </tr>
 </table>
 
+### frame_warp
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Windows only. Offers Frame Warp to clients: `/serverinfo` carries `FrameWarpVersion` `1` and the
+            RTSP DESCRIBE answer of a game stream carries `a=x-rl-control:0x5543,0x5544,0x5545,0x5546`. A
+            client that asks (control message `0x5543` with `enabled` 1, over the encrypted control stream)
+            shows camera turns on its next screen refresh instead of after the network round trip and the
+            game's own delay. For each game the host learns, from small luma thumbnails of the captured
+            frames and the client's mouse and right-stick input, how far the picture moves per mouse count
+            and per second of stick, how long the game takes to show an input, the camera's field of view,
+            and which parts of the picture (the HUD) stay put; it tags every video frame with the input the
+            frame reflects (`0x5544` model, `0x5545` tags, `0x5546` HUD mask). What it learned is kept per game in
+            `frame_warp.json` in the host's state directory. The host does no work for a client that did not
+            ask: no GPU pass, no thread, no message. Streams that cannot be measured (PyroWave) are answered
+            with an unlocked model and never tagged. The option is read at DESCRIBE.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            frame_warp = disabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### hdr_dynamic_metadata
 
 <table>

@@ -37,6 +37,7 @@ extern "C" {
 #include "capture_action.h"
 #include "config.h"
 #include "client_roaming.h"
+#include "frame_warp_policy.h"
 #include "focus_hints.h"
 #include "host_stream_control.h"
 #include "globals.h"
@@ -222,6 +223,7 @@ namespace rtsp_stream {
     snapshot->av_ping_payload = av_ping_payload;
     snapshot->control_connect_data = control_connect_data;
     snapshot->client_roaming_offered = client_roaming_offered;
+    snapshot->frame_warp_offered = frame_warp_offered;
     snapshot->unique_id = unique_id;
     snapshot->client_uuid = client_uuid;
     snapshot->client_name = client_name;
@@ -2201,6 +2203,17 @@ namespace rtsp_stream {
     if (config::stream.client_roaming) {
       ss << client_roaming::sdp_attribute << std::endl;
       session->client_roaming_offered = true;
+    }
+
+    // Frame Warp (frame_warp_wire.h): a normal game stream only, with the setting on. The ids are
+    // announced per session, before the client picks a codec; the host does nothing until the
+    // client asks, and a client that doesn't know them ignores the line.
+    session->frame_warp_offered = frame_warp::policy::offered_in_describe(
+      config::stream.frame_warp,
+      !session->input_only && session->role == remote_session::role_e::game && !session->secondary_game_client
+    );
+    if (session->frame_warp_offered) {
+      ss << frame_warp::sdp_attribute << std::endl;
     }
 
     if (video::last_encoder_probe_supported_ref_frames_invalidation) {

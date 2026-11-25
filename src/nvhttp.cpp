@@ -57,6 +57,7 @@
 #include "display_device.h"
 #include "display_helper_integration.h"
 #include "file_handler.h"
+#include "frame_warp_policy.h"
 #include "globals.h"
 #include "hardware_metrics.h"
 #include "hdr_request_policy.h"
@@ -4453,6 +4454,11 @@ namespace nvhttp {
       tree.put("root.ServerCodecModeSupport", codec_mode_flags);
       // Capability bit for clients: this host reads the screen luminance they report at launch.
       tree.put("root.ClientLuminanceSupported", 1);
+      // Frame Warp (frame_warp_wire.h): the host takes the client's request and does the work only for a
+      // client that asks. Stock clients ignore the element.
+      if (frame_warp::policy::offered_in_serverinfo(config::stream.frame_warp)) {
+        tree.put("root.FrameWarpVersion", frame_warp::policy::serverinfo_value());
+      }
 
       tree.put("root.PairStatus", pair_status);
     // This is the host's outbound physical link, not measured end-to-end
