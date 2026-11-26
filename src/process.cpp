@@ -3282,6 +3282,32 @@ namespace proc {
       platf::playnite::stop_client_for_session();
     }
 #endif
+    // A cancel can arrive while Steam is still starting the game, before
+    // running() has associated the new process tree. Keep looking for it until
+    // the launch window closes, otherwise the game would be orphaned.
+    if (_steam_tracking_active && !_steam_tracking_associated && _steam_tracker.tree().empty()) {
+      const auto provider_name = !_app.steam_id.empty() ? "Steam" : "Lutris";
+      const auto wait_deadline = std::max(
+        _steam_tracking_deadline,
+        std::chrono::steady_clock::now() + 5s
+      );
+      const auto shutting_down = [] {
+        return lifetime::shutdown_signal_requested.load(std::memory_order_relaxed);
+      };
+      BOOST_LOG(info) << provider_name << " app is still starting; waiting for its process tree before terminating.";
+      while (!shutting_down()) {
+        if (_steam_tracker.finish().associated()) {
+          _steam_tracking_associated = true;
+          BOOST_LOG(info) << provider_name << " process tree found during termination.";
+          break;
+        }
+        if (std::chrono::steady_clock::now() >= wait_deadline) {
+          break;
+        }
+        std::this_thread::sleep_for(100ms);
+      }
+    }
+
     // Provider URI launchers are not the game process and their process group
     // does not own the Proton/Wine tree. Stop only identities retained by the
     // tracker; Steam/Lutris client and runtime PIDs are never inserted.
