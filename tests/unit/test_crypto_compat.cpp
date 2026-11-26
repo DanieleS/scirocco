@@ -87,6 +87,37 @@ int main() {
   assert(binary_sig.size() == sig.size() && binary_sig[0] == '\0');
   assert(std::memcmp(binary_sig.data() + 1, sig.data() + 1, sig.size() - 1) == 0);
 
+  // A paired client's own certificate is accepted; one signed by it (made with its key) is not.
+  {
+    auto paired = std::make_shared<crypto::named_cert_t>();
+    paired->cert = creds.x509;
+    crypto::cert_chain_t chain;
+    chain.add(paired);
+
+    crypto::p_named_cert_t matched;
+    assert(chain.verify(cert.get(), matched) == nullptr);
+    assert(matched == paired);
+
+    crypto::x509_t derived {X509_new()};
+    assert(derived);
+    assert(X509_set_version(derived.get(), 2) == 1);
+    assert(ASN1_INTEGER_set(X509_get_serialNumber(derived.get()), 2) == 1);
+    assert(X509_gmtime_adj(X509_getm_notBefore(derived.get()), 0));
+    assert(X509_gmtime_adj(X509_getm_notAfter(derived.get()), 3600));
+    crypto::x509_name_t derived_name {X509_NAME_new()};
+    assert(derived_name);
+    constexpr unsigned char derived_cn[] = "Derived Client";
+    assert(X509_NAME_add_entry_by_txt(derived_name.get(), "CN", MBSTRING_ASC, derived_cn, sizeof(derived_cn) - 1, -1, 0) == 1);
+    assert(X509_set_subject_name(derived.get(), derived_name.get()) == 1);
+    assert(X509_set_issuer_name(derived.get(), X509_get_subject_name(cert.get())) == 1);
+    assert(X509_set_pubkey(derived.get(), key.get()) == 1);
+    assert(X509_sign(derived.get(), key.get(), EVP_sha256()) > 0);
+
+    crypto::p_named_cert_t derived_match;
+    assert(chain.verify(derived.get(), derived_match) != nullptr);
+    assert(!derived_match);
+  }
+
   for (fail_step = 1; fail_step <= 5; ++fail_step) {
     auto failed = crypto::gen_creds("Sunshine Gamestream Host", 1024);
     assert(failed.x509.empty() && failed.pkey.empty());
