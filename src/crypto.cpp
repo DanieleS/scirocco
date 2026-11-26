@@ -21,8 +21,10 @@ namespace crypto {
   void cert_chain_t::add(p_named_cert_t &named_cert_p) {
     x509_store_t x509_store {X509_STORE_new()};
 
-    X509_STORE_add_cert(x509_store.get(), x509(named_cert_p->cert).get());
-    _certs.emplace_back(std::make_pair(named_cert_p, std::move(x509_store)));
+    auto cert = x509(named_cert_p->cert);
+
+    X509_STORE_add_cert(x509_store.get(), cert.get());
+    _certs.push_back({named_cert_p, std::move(x509_store), std::move(cert)});
   }
 
   void cert_chain_t::clear() {
@@ -75,12 +77,12 @@ namespace crypto {
    */
   const char *cert_chain_t::verify(x509_t::element_type *cert, p_named_cert_t &named_cert_out) {
     int err_code = 0;
-    for (auto &[named_cert_p, x509_store] : _certs) {
+    for (auto &paired : _certs) {
       auto fg = util::fail_guard([this]() {
         X509_STORE_CTX_cleanup(_cert_ctx.get());
       });
 
-      X509_STORE_CTX_init(_cert_ctx.get(), x509_store.get(), cert, nullptr);
+      X509_STORE_CTX_init(_cert_ctx.get(), paired.store.get(), cert, nullptr);
       X509_STORE_CTX_set_verify_cb(_cert_ctx.get(), openssl_verify_cb);
 
       // We don't care to validate the entire chain for the purposes of client auth.
@@ -91,8 +93,15 @@ namespace crypto {
       auto err = X509_verify_cert(_cert_ctx.get());
 
       if (err == 1) {
-        named_cert_out = named_cert_p;
-        return nullptr;
+        // Only the paired certificate itself: one it merely signed (a paired client can make one
+        // with its key) verifies too, and would get back the access taken away from that client
+        // (Sunshine GHSA-6jvv-jqr7-m6m3).
+        if (paired.cert && X509_cmp(cert, paired.cert.get()) == 0) {
+          named_cert_out = paired.named_cert;
+          return nullptr;
+        }
+        err_code = X509_V_ERR_CERT_REJECTED;
+        continue;
       }
 
       err_code = X509_STORE_CTX_get_error(_cert_ctx.get());
