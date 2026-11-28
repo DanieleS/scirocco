@@ -175,7 +175,6 @@ namespace crypto {
     };
 
     std::vector<paired_cert_t> _certs;
-    x509_store_ctx_t _cert_ctx;
   };
 
   namespace cipher {

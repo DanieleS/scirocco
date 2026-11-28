@@ -7,9 +7,12 @@
 #include "../../src/crypto.h"
 #include <openssl/pem.h>
 #include <openssl/rsa.h>
+#include <atomic>
 #include <cassert>
 #include <cstring>
 #include <iostream>
+#include <thread>
+#include <vector>
 
 namespace {
   int fail_step = 0;
@@ -116,6 +119,24 @@ int main() {
     crypto::p_named_cert_t derived_match;
     assert(chain.verify(derived.get(), derived_match) != nullptr);
     assert(!derived_match);
+
+    // Concurrent handshakes verify against one chain: no shared X509_STORE_CTX.
+    std::atomic<int> failures {0};
+    std::vector<std::thread> workers;
+    for (int t = 0; t < 8; ++t) {
+      workers.emplace_back([&]() {
+        for (int i = 0; i < 300; ++i) {
+          crypto::p_named_cert_t m;
+          if (chain.verify(cert.get(), m) != nullptr || m != paired) {
+            ++failures;
+          }
+        }
+      });
+    }
+    for (auto &w : workers) {
+      w.join();
+    }
+    assert(failures == 0);
   }
 
   for (fail_step = 1; fail_step <= 5; ++fail_step) {
