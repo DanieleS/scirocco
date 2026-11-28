@@ -1019,6 +1019,7 @@ namespace config {
     ENCRYPTION_MODE_OPPORTUNISTIC,  // wan_encryption_mode
 
     0,  // pacing_max_bitrate_kbps (0 = legacy 1 Gbps Ethernet assumption)
+    5,  // remote_pacing_ms (0 = a remote client's packets are not spread out)
     0,  // packetsize (0 = off)
   };
 
@@ -2310,6 +2311,7 @@ namespace config {
 
     int_between_f(vars, "fec_percentage", stream.fec_percentage, {1, 255});
     int_between_f(vars, "pacing_max_bitrate_kbps", stream.pacing_max_bitrate_kbps, {0, 10000000});
+    int_between_f(vars, "remote_pacing_ms", stream.remote_pacing_ms, {0, 12});
     int_between_f(vars, "packetsize", stream.packetsize, {0, PACKETSIZE_MAX});
     vars.erase("pyrowave_send_rate_mbps");
     int_between_f(vars, "pyrowave_critical_fec_percentage", stream.pyrowave_critical_fec_percentage, {0, 255});

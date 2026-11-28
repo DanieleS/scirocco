@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -36,7 +37,7 @@ namespace pyrowave {
 }
 namespace config {
   struct { int pacing_max_bitrate_kbps = 0, fec_percentage = 20,
-               pyrowave_critical_fec_percentage = 20, video_max_batch_size_kb = 64;
+               pyrowave_critical_fec_percentage = 20, video_max_batch_size_kb = 64, remote_pacing_ms = 0;
           bool pacing_batch_demand_limit = false, pacing_group_demand_limit = false, host_adaptive_pacing = false; } stream;
 }
 struct config_t {
@@ -127,6 +128,9 @@ std::pair<size_t, size_t> pace(int cap, bool encrypted = false, bool pyro = fals
   const std::size_t payload_blocksize = blocksize - sizeof(video_packet_raw_t);
   const std::size_t min_parity_shards = session->config.minRequiredFecPackets;
   std::uint64_t logged_remote_pacing_bps = 0;
+  // The remote-client spread is off here (remote_pacing_ms = 0); these only feed its frame size.
+  const std::size_t total_shards = actual_frame_packets, fec_blocks_needed = 1;
+  const int fecPercentage = config::stream.fec_percentage;
   for (int once = 0; once != 1; ++once) {
 @PACER@
     if (pyrowave_session) {
@@ -166,7 +170,7 @@ TEST(VideoPacingIntegration, PyroWaveIgnoresOrdinaryAdaptiveOption) {
   for(const int cap : {0,8000,200000})for(const bool demand : {false,true})
     EXPECT_EQ(pace(cap,true,true,1408,1000,true,demand,true),pace(cap,true,true,1408,1000,true,demand,false));
 }
-bool checks_deadline(int pacing_ceiling, size_t ratecontrol_group_packets_sent, size_t ratecontrol_frame_packets_sent, size_t ratecontrol_packets_in_1ms) {
+bool checks_deadline(int pacing_ceiling, size_t ratecontrol_group_packets_sent, size_t ratecontrol_frame_packets_sent, size_t ratecontrol_packets_in_1ms, bool remote_client_pacing = false) {
   return @CONDITION@;
 }
 void reset(int cap) {
