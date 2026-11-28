@@ -313,6 +313,10 @@ namespace config {
     // raise the ceiling. 0 retains legacy/adaptive pacing without admission.
     int pacing_max_bitrate_kbps;
 
+    // A remote client (packets of 1024 bytes or less): the longest a frame's packets are
+    // spread over, in ms. 0 = sent at once like on a LAN.
+    int remote_pacing_ms;
+
     // Limit the packetsize to avoid fragmentation on a low MTU link. 0 = off.
     int packetsize;
   };

@@ -3485,23 +3485,39 @@ namespace stream {
         size_t ratecontrol_packets_in_1ms = std::giga::num * 80 / 100 / 1000 / blocksize / 8;
         ratecontrol_packets_in_1ms = std::max<size_t>(1, ratecontrol_packets_in_1ms);
         // A client streaming remotely (Moonlight asks for packets of 1024 bytes or less over a
-        // VPN or the internet) gets each frame spread out at 4x the stream's bitrate (at least
-        // 20 Mbps) instead of a sub-millisecond burst that small tunnel/firewall buffers drop.
+        // VPN or the internet) gets every frame spread out, small ones too: links with a small
+        // allowance per flow drop the tail of a burst and the repair packets right behind it.
+        // Packets go out a few at a time (4 at least, about half a millisecond's worth) at the
+        // stream's own bitrate (10 to 50 Mbps), or faster for a frame that would take longer than
+        // remote_pacing_ms (a third of a frame interval at most).
         // An explicit operator ceiling and PyroWave's own adaptive pacing take precedence.
         bool remote_client_pacing = false;
-        if (!pyrowave_session && pacing_ceiling == 0 && session->config.packetsize <= 1024) {
+        std::size_t remote_batch_packets = 0;
+        if (!pyrowave_session && pacing_ceiling == 0 && session->config.packetsize <= 1024 && config::stream.remote_pacing_ms > 0) {
           const auto stream_kbps = session->video.pacing_bitrate_kbps.load(std::memory_order_relaxed);
           const std::uint64_t stream_bps = stream_kbps > 0 ? std::uint64_t(stream_kbps) * 1000 : std::uint64_t(std::max(session->config.monitor.bitrate, 0)) * 1000;
           if (stream_bps > 0) {
-            const std::uint64_t pacing_bps = std::max<std::uint64_t>(20'000'000, 4 * stream_bps);
-            const auto remote_packets_in_1ms = std::max<size_t>(1, pacing_bps / 1000 / blocksize / 8);
+            const std::uint64_t floor_bps = std::clamp<std::uint64_t>(stream_bps, 10'000'000, 50'000'000);
+            const auto floor_packets = std::max<size_t>(1, floor_bps / 1000 / blocksize / 8);
+
+            double spread_ms = config::stream.remote_pacing_ms;
+            if (session->config.monitor.framerate > 0) {
+              spread_ms = std::min(spread_ms, 1000.0 / session->config.monitor.framerate / 3.0);
+            }
+            // Data packets plus the FEC ones
+            std::size_t frame_packets = total_shards;
+            frame_packets += frame_packets * fecPercentage / 100 + fec_blocks_needed * 2;
+
+            const auto remote_packets_in_1ms = std::max<size_t>(floor_packets, (size_t) std::ceil(frame_packets / std::max(spread_ms, 1.0)));
             if (remote_packets_in_1ms < ratecontrol_packets_in_1ms) {
               ratecontrol_packets_in_1ms = remote_packets_in_1ms;
+              remote_batch_packets = std::max<size_t>(4, (remote_packets_in_1ms + 1) / 2);
               remote_client_pacing = true;
-              if (pacing_bps != logged_remote_pacing_bps) {
-                BOOST_LOG(info) << "Video pacing: "sv << pacing_bps / 1'000'000 << " Mbps ("sv << stream_bps / 1'000'000
+              if (floor_bps != logged_remote_pacing_bps) {
+                BOOST_LOG(info) << "Video pacing: remote client, a frame's packets go out over up to "sv << config::stream.remote_pacing_ms
+                                << " ms, at "sv << floor_bps / 1'000'000 << " Mbps or more ("sv << stream_bps / 1'000'000
                                 << " Mbps stream, "sv << session->config.packetsize << "-byte packets)"sv;
-                logged_remote_pacing_bps = pacing_bps;
+                logged_remote_pacing_bps = floor_bps;
               }
             }
           }
@@ -3678,8 +3694,8 @@ namespace stream {
           max_batch_size_bytes = std::min(max_batch_size_bytes, capped_batch_packets * datagram_size);
         }
         if (remote_client_pacing) {
-          // A batch larger than one pacing group would leave as a burst.
-          max_batch_size_bytes = std::min(max_batch_size_bytes, ratecontrol_packets_in_1ms * datagram_size);
+          // A batch larger than half a millisecond's worth would leave as a burst.
+          max_batch_size_bytes = std::min(max_batch_size_bytes, remote_batch_packets * datagram_size);
         }
 
         // Encryption adds a prefix to every datagram. Omitting it here lets a
@@ -3846,8 +3862,9 @@ namespace stream {
               // Do pacing within the frame.
               // Also trigger pacing before the first send_batch() of the frame
               // to account for the last send_batch() of the previous frame.
+              // (a remote client: before every batch, which is a few packets)
               if (pacing_ceiling > 0 || ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms ||
-                  ratecontrol_frame_packets_sent == 0) {
+                  ratecontrol_frame_packets_sent == 0 || remote_client_pacing) {
                 auto due = ratecontrol_frame_start + frame_pacing_delay(ratecontrol_frame_packets_sent);
 
                 auto now = std::chrono::steady_clock::now();

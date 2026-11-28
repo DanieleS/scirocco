@@ -3090,6 +3090,17 @@ of the demand and adaptive deadlines. The operator's `pacing_max_bitrate_kbps`
 ceiling always applies, and accepted packets retain their debt across frames.
 PyroWave is unchanged. Example: `pacing_group_demand_limit = true`.
 
+### remote_pacing_ms
+
+A client that asks for packets of 1024 bytes or less (a VPN or the internet) gets
+every frame's packets spread out, small frames included: they leave a few at a time
+(at least 4, about half a millisecond's worth), at the stream's own bitrate (10 to
+50 Mbps) or faster for a frame that would otherwise take longer than this many
+milliseconds (and never longer than a third of a frame interval). Range 0 to 12,
+default 5; `0` sends a remote client's packets at once, like a LAN client. LAN
+clients, PyroWave and a nonzero `pacing_max_bitrate_kbps` are unaffected.
+Example: `remote_pacing_ms = 5`.
+
 ### host_adaptive_pacing
 
 <table>
